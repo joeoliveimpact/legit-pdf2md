@@ -19,8 +19,10 @@ INLINE_DATA = re.compile(r"!\[[^\]]*\]\(\s*<?data:image/[^)\s>]*>?\s*\)")       
 BOLD_WRAP = re.compile(r"\*\*\s*(\[image \d+\])\s*\*\*")
 ENTITY = re.compile(r"&(?:[A-Za-z][A-Za-z0-9]{1,31}|#\d{1,7}|#[xX][0-9A-Fa-f]{1,6});")
 ESC = re.compile(r"\\([\[\]().!#+\-=~{}&])")    # \* \_ \` \| \< \> stay escaped: they still matter
-# An escape that stops a line (or a blockquote / list item) becoming syntax stays escaped.
-LINE_HEAD_ESC = re.compile(r"^(\s*(?:>\s*)*(?:(?:[-*+]|\d+[.)])\s+)?(?:\d+\\[.)]|\\[#>+\-=]))")
+# An escape that stops a line (or a blockquote / list item) becoming syntax stays escaped. A heading whose
+# own text starts with a hash keeps it too, so "# \#Tag" does not read back as the doubled marker "# # Tag".
+LINE_HEAD_ESC = re.compile(
+    r"^(\s*(?:>\s*)*(?:#{1,6}[ \t]+\\#|(?:(?:[-*+]|\d+[.)])\s+)?(?:\d+\\[.)]|\\[#>+\-=])))")
 STRAY_MID = re.compile(r"(?<=[^\W\d_])\*+(?=[^\W\d_])")        # OCR: Con*tract (letters both sides only)
 EMPH_JOIN = re.compile(r"(?<=[^\W_])[*_]+(?=[^\W_])")           # markers inside a word: un**paid**, **Fathom**B
 SPACED = re.compile(r"(?:(?<![^\s*_`])\S ){2,}\S(?![^\s*_`])")  # "S T A R T", "W H Y", "**D a y 1**"
@@ -519,9 +521,11 @@ def selftest():
     # GMC-006: a broken char mid-line keeps the word space
     assert strip("hello\ufffd world")[0] == "hello world\n"
     # GMC-007: escapes that stop a line becoming a list, heading or quote stay escaped
-    for keep in ("1\\. not a list", "1\\) not a list", "> \\# not a heading", "- \\# not a heading", "\\> not a quote"):
+    for keep in ("1\\. not a list", "1\\) not a list", "> \\# not a heading", "- \\# not a heading", "\\> not a quote",
+                 "# \\#Tag stays escaped", "### \\#Tag stays escaped"):
         assert strip(keep)[0].strip() == keep, keep
     assert strip("mid \\# and \\[x\\]")[0].strip() == "mid # and [x]"
+    assert strip("# heading \\# mid-line")[0].strip() == "# heading # mid-line"
     # GMC-008: a normal link definition named like an image survives
     link = "[Manual][image1]\n\n[image1]: https://example.com/manual"
     assert strip(link)[0].strip() == link

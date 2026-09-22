@@ -77,14 +77,18 @@ Where the download and the script run matters, because the raw export is the exp
 ## Step 3: Strip the junk (script)
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/skills/legit-pdf2md/scripts/clean_gdoc_md.py" strip export.md -o clean.md
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/legit-pdf2md/scripts/clean_gdoc_md.py" strip export.md -o clean.md
 ```
 
 `${CLAUDE_PLUGIN_ROOT}` is set for an installed plugin. If it is empty (the skill was copied in by
 hand, or the shell does not expand it), use the base directory this skill was loaded from, or find
 the file once with `find ~/.claude -name clean_gdoc_md.py` and use that absolute path for both this
 step and Step 5. Never fall back to cleaning the Markdown by hand: the script and its check are what
-make the wording guarantee true. If `python` is not found, try `python3`.
+make the wording guarantee true.
+
+`python3` is the name that exists on macOS and most Linux boxes; on Windows it is usually `python`.
+Use whichever the shell answers to, the same one for Step 5. The script needs nothing but the
+standard library, any version from 3.8 up.
 
 It works outside fenced code blocks only; code blocks (including ones inside quotes and lists) and inline code are never touched. It removes base64 images (leaving `[image N]` placeholders), `&nbsp;` and other entities, broken characters, Google's backslash escapes, the code-font backticks the Drive API export wraps around letter-spaced text and bare step numbers, asterisks that OCR scatters between letters, trailing spaces and extra blank lines. It never changes wording. It prints JSON with `stats` and a `worklist`.
 
@@ -120,7 +124,7 @@ A script cannot do this part, because the export has lost information that only 
 ## Step 5: Check the wording
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/skills/legit-pdf2md/scripts/clean_gdoc_md.py" check export.md clean.md
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/legit-pdf2md/scripts/clean_gdoc_md.py" check export.md clean.md
 ```
 
 It compares wording word by word, in any language, ignoring spacing, case, Markdown, code-fence lines and removed junk. It does not compare punctuation, which is why Step 3 never touches code. Exit code 1 means it failed.
