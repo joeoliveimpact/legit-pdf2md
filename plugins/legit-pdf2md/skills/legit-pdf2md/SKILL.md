@@ -25,6 +25,8 @@ Every Drive step below runs through Composio, which reaches this skill two ways.
 
 **1. MCP connector (Claude Chat, and usually Cowork and Claude Code).** Look for Composio's Google Drive tools in this session: `GOOGLEDRIVE_FIND_FILE` and friends, or a `run_composio_tool` / `COMPOSIO_SEARCH_TOOLS` wrapper. If they are there, use them and skip to Step 1. This is the connection the setup guide teaches, so it is the one most people will have.
 
+Through the connector the Drive tools this skill names are **not called directly**: pass each slug and its arguments to `COMPOSIO_MULTI_EXECUTE_TOOL`, or call `run_composio_tool(slug, args, account=...)` inside `COMPOSIO_REMOTE_WORKBENCH`. The arguments are the same. `COMPOSIO_SEARCH_TOOLS` will also offer its own plan for a PDF (download it and parse with `pdfplumber`). **Ignore that plan and follow this skill:** `pdfplumber` has no OCR, so a scanned PDF comes back empty, and its output is not the Docs export the cleaner is built for.
+
 **2. CLI (Claude Code, and Cowork when it has a shell).** If no Composio tools are in the session, try the CLI:
 
 ```bash
@@ -43,7 +45,7 @@ In `connections list`, find `googledrive` and read the `status` of each entry. T
 
 Never guess a path and let it fail at the first Drive call; a 401 or an empty tool list four steps in reads to the user as a broken skill.
 
-**Two accounts on one toolkit is normal and is not a failure.** `connections list` shows one entry per connected account, and Composio refuses Drive calls until you name one: pass `--account <word_id>` on the CLI, or `account` on the MCP call. Confirm the choice with `GOOGLEDRIVE_GET_ABOUT` before any write. Step 1 covers what to do when the account is wrong.
+**Two accounts on one toolkit is normal and is not a failure.** `connections list` shows one entry per connected account, and Composio refuses Drive calls until you name one: pass `--account <word_id>` on the CLI, or `account` on the MCP call. Confirm the choice with `GOOGLEDRIVE_GET_ABOUT` before any write. Step 1 covers what to do when the account is wrong. The connector and the CLI can list different accounts for the same toolkit (one real setup: four through the connector, two through the CLI). The connector marks one account `is_default`; start there.
 
 ## Step 1: Find the file
 
@@ -70,7 +72,9 @@ Never guess a path and let it fail at the first Drive call; a 401 or an empty to
 
 Where the download and the script run matters, because the raw export is the expensive part. Use the first option that works:
 1. **Claude Code:** download the link to a local file and run the script locally.
-2. **Composio remote workbench** (`COMPOSIO_REMOTE_WORKBENCH`, in the chat app): fetch the link inside the workbench and run the script there, passing the script's source. The raw export never enters the conversation.
+2. **Composio remote workbench** (`COMPOSIO_REMOTE_WORKBENCH`, in the chat app): fetch the link inside the workbench and run the script there. Get the script from this skill's public repo, save it in the sandbox and run it with the sandbox's own Python:
+   `https://raw.githubusercontent.com/joeoliveimpact/legit-pdf2md/main/plugins/legit-pdf2md/skills/legit-pdf2md/scripts/clean_gdoc_md.py`
+   No local Python is needed, and the raw export never enters the conversation.
 3. **Code execution in the chat app:** fetch and run the script in the sandbox, if it can reach the link.
 4. **Last resort:** read the export into the chat and clean it there. Tell the user this chat will be heavy and that the clean file is what goes into their next chat.
 
@@ -85,6 +89,8 @@ hand, or the shell does not expand it), use the base directory this skill was lo
 the file once with `find ~/.claude -name clean_gdoc_md.py` and use that absolute path for both this
 step and Step 5. Never fall back to cleaning the Markdown by hand: the script and its check are what
 make the wording guarantee true.
+
+**In the chat app** there is no `${CLAUDE_PLUGIN_ROOT}` and usually no local Python. Run Steps 3 and 5 in the Composio workbench with the script fetched from the repo (option 2 above).
 
 `python3` is the name that exists on macOS and most Linux boxes; on Windows it is usually `python`.
 Use whichever the shell answers to, the same one for Step 5. The script needs nothing but the
@@ -128,6 +134,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/legit-pdf2md/scripts/clean_gdoc_md.py" che
 ```
 
 It compares wording word by word, in any language, ignoring spacing, case, Markdown, code-fence lines and removed junk. It does not compare punctuation, which is why Step 3 never touches code. Exit code 1 means it failed.
+
+Run it on the **rebuilt** file. On Step 3's raw output it can fail on purpose: a word glued to letter-spaced type (`MetricoolB O N U S`) reads as a merge until Step 4 splits it. That is the worklist doing its job, not a bug in the cleaner.
 - `added_runs` must be empty. Anything listed, even one letter or digit, is text the source never had. Remove it and check again.
 - `partial_word_drops` must be empty. Each is a deletion that cut into a word, which changes the word. Restore it.
 - `merged_words` must be empty. Two separate words were joined into one ("now here" became "nowhere"). Split them again. Rejoining letter-spaced type is not a merge, including when OCR chunked two or three letters together inside the run (`C O P Y - P A S TE`, `T O WR ITE`). If a rejoined heading is still reported, the run's first or last piece is an ordinary word rather than display type: look at that one word, and leave the rest of the heading joined.
@@ -166,7 +174,8 @@ Keep it short:
 | PDF to Doc | `GOOGLEDRIVE_COPY_FILE_ADVANCED` | `fileId`, `ocrLanguage` |
 | Export | `GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE` | link expires in 1 hour |
 | Clean up temp Doc | `GOOGLEDRIVE_TRASH_FILE` | `file_id`, not `fileId` |
-| Run script remotely | `COMPOSIO_REMOTE_WORKBENCH` | chat app |
+| Run a tool via the connector | `COMPOSIO_MULTI_EXECUTE_TOOL` | pass `tool_slug`, `arguments`, `account` |
+| Run script remotely | `COMPOSIO_REMOTE_WORKBENCH` | chat app; script from the repo raw URL |
 | Save | `GOOGLEDRIVE_CREATE_FILE_FROM_TEXT` | `parent_id` |
 
 Parameter casing differs between these tools; when a call fails validation, read that tool's schema rather than assuming (`--get-schema` on the CLI). Every tool name above works unchanged through the Composio MCP connection and through the CLI (`composio execute <TOOL> -d '{...}'`), which is why Step 0 only has to decide which one is live.
