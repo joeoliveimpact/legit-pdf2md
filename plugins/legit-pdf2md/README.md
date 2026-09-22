@@ -84,8 +84,10 @@ Some things a PDF cannot give back, and it tells you when that happens:
 - `skills/legit-pdf2md/scripts/clean_gdoc_md.py` - the cleaner. **Standard library only**: no network, no API key, no dependencies. `strip` removes the junk, `check` proves the wording survived, `selftest` proves both work.
 
 ```bash
-python clean_gdoc_md.py selftest
+python3 clean_gdoc_md.py selftest
 ```
+
+On Windows that is usually `python` rather than `python3`.
 
 ## Licence
 
