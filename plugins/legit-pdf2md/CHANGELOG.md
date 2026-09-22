@@ -2,7 +2,7 @@
 
 ## 0.1.1 - 2026-09-22
 
-Three fixes found by running v0.1.0 end to end on a second machine, against a real 12-page PDF.
+Five fixes found by running v0.1.0 end to end on a second machine, against a real 12-page PDF.
 
 - **The script is now called by its installed path.** Steps 3 and 5 said `python scripts/clean_gdoc_md.py`, which does not exist from the working directory of an installed plugin. They now use `${CLAUDE_PLUGIN_ROOT}`, with a fallback and a note that cleaning by hand is never the answer.
 - **Step 1 now asks Drive for `parents`.** `GOOGLEDRIVE_GET_FILE_METADATA` returns `kind, id, name, mimeType` only unless `fields` is passed, so the parent folder came back missing and the clean file could not be saved beside its source.
