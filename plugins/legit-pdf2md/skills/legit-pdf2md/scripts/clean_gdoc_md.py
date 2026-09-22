@@ -292,14 +292,23 @@ def _stream(text):
         sep = t[words[k - 1][-1][1] + 1:words[k][0][1]].replace("\0", "")
         return bool(sep) and sep[0] in " \t" and "\n" not in sep and len(sep.strip()) <= 1
 
+    def chunk(k):
+        """OCR joins two or three letters of display type together: "P A S TE", "P R OM P T", "WR ITE"."""
+        return 2 <= len(words[k]) <= 3 and all(c.isupper() or c.isdigit() for c, _ in words[k])
+
     in_run = [False] * n
     k = 0
     while k < n:
         if len(words[k]) == 1:
             e = k + 1
-            while e < n and len(words[e]) == 1 and spaced_sep(e):
+            while e < n and spaced_sep(e) and (len(words[e]) == 1 or chunk(e)):
                 e += 1
-            if e - k >= 3:
+            # a run always starts on a single character, and ends on one or on a single trailing chunk
+            # ("P A S TE:"), never on a stretch of ordinary words: "GO H O M E", "H O M E PA GE" stay merges
+            while e - 1 > k and len(words[e - 1]) != 1 and len(words[e - 2]) != 1:
+                e -= 1
+            singles = sum(1 for w in words[k:e] if len(w) == 1)
+            if singles >= 3 and singles >= (e - k) - singles:   # mostly single characters, not ordinary words
                 in_run[k:e] = [True] * (e - k)
             k = e
         else:
@@ -556,6 +565,15 @@ def selftest():
     assert not check("a, b, c", "abc")["ok"], "comma-separated letters are not letter-spacing"
     assert check("S T A R T W H E R E Y O U A R E", "Start where you are")["ok"]
     assert check("P A R T 1 \u00b7 S T A R T", "Part 1 \u00b7 Start")["ok"]
+    # OCR chunks two letters of display type together; rejoining the run is still not a merge
+    assert check("C O P Y - P A S TE S T A R TE R P R OM P T", "Copy-paste starter prompt")["ok"]
+    assert check("U S E C L A U D E T O WR ITE Y O U R S E Q U E N C E S",
+                 "Use Claude to write your sequences")["ok"], "three-letter chunks happen too"
+    assert check("C O P Y - P A S TE: N O TE B O O K L M", "Copy-paste: NotebookLM")["ok"], \
+        "punctuation can end a run on its chunk"
+    assert not check("GO TO H O M E", "GOTOHOME")["ok"], "a chunk outside the run keeps its hard boundary"
+    assert not check("go to H O M E", "gotohome")["ok"], "lower-case words are not OCR chunks"
+    assert not check("H O M E PA GE", "HOMEPAGE")["ok"], "a run never continues past its last single letter"
     r = check("MetricoolB O N U S", "Metricool Bonus")
     assert r["ok"] and r["split_words"], r
     assert not check("MetricoolB O N U S", "MetricoolBonus")["ok"], "glue without the matching split is a merge"

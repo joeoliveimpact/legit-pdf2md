@@ -48,7 +48,12 @@ Never guess a path and let it fail at the first Drive call; a 401 or an empty to
 ## Step 1: Find the file
 
 - Get the Drive file ID from the link (the part after `/d/`), or search by name with `GOOGLEDRIVE_FIND_FILE`.
-- Call `GOOGLEDRIVE_GET_FILE_METADATA` for its type and parent folder ID. Keep the folder ID for Step 6.
+- Call `GOOGLEDRIVE_GET_FILE_METADATA` for its type and parent folder ID, and **ask for the fields
+  by name**: `{"fileId": "<id>", "fields": "id,name,mimeType,parents,driveId"}`. Without `fields` the
+  tool answers with `kind, id, name, mimeType` only, and `parents` is silently missing. Keep the
+  folder ID for Step 6; that ID is the only thing that puts the clean file back where the source
+  lives. If `parents` still does not come back, say so and ask where to save rather than guessing a
+  folder.
 - **If several Google accounts are connected** (Step 0), pass the account on each call: `account` on an MCP call, `run_composio_tool(..., account=...)` in the workbench, `--account <word_id>` on the CLI. Choose the account that owns or can see the file, and confirm it with `GOOGLEDRIVE_GET_ABOUT` before any write.
 - **If a call returns 404 "File not found"**, call `GOOGLEDRIVE_GET_ABOUT` before doubting the ID. The Composio connection is often signed in to a different Google account than the one that owns the file, and Drive answers a wrong account with the same 404 as a wrong ID. Tell the user which account the connection uses.
 
@@ -72,8 +77,14 @@ Where the download and the script run matters, because the raw export is the exp
 ## Step 3: Strip the junk (script)
 
 ```bash
-python scripts/clean_gdoc_md.py strip export.md -o clean.md
+python "${CLAUDE_PLUGIN_ROOT}/skills/legit-pdf2md/scripts/clean_gdoc_md.py" strip export.md -o clean.md
 ```
+
+`${CLAUDE_PLUGIN_ROOT}` is set for an installed plugin. If it is empty (the skill was copied in by
+hand, or the shell does not expand it), use the base directory this skill was loaded from, or find
+the file once with `find ~/.claude -name clean_gdoc_md.py` and use that absolute path for both this
+step and Step 5. Never fall back to cleaning the Markdown by hand: the script and its check are what
+make the wording guarantee true. If `python` is not found, try `python3`.
 
 It works outside fenced code blocks only; code blocks (including ones inside quotes and lists) and inline code are never touched. It removes base64 images (leaving `[image N]` placeholders), `&nbsp;` and other entities, broken characters, Google's backslash escapes, the code-font backticks the Drive API export wraps around letter-spaced text and bare step numbers, asterisks that OCR scatters between letters, trailing spaces and extra blank lines. It never changes wording. It prints JSON with `stats` and a `worklist`.
 
@@ -109,13 +120,13 @@ A script cannot do this part, because the export has lost information that only 
 ## Step 5: Check the wording
 
 ```bash
-python scripts/clean_gdoc_md.py check export.md clean.md
+python "${CLAUDE_PLUGIN_ROOT}/skills/legit-pdf2md/scripts/clean_gdoc_md.py" check export.md clean.md
 ```
 
 It compares wording word by word, in any language, ignoring spacing, case, Markdown, code-fence lines and removed junk. It does not compare punctuation, which is why Step 3 never touches code. Exit code 1 means it failed.
 - `added_runs` must be empty. Anything listed, even one letter or digit, is text the source never had. Remove it and check again.
 - `partial_word_drops` must be empty. Each is a deletion that cut into a word, which changes the word. Restore it.
-- `merged_words` must be empty. Two separate words were joined into one ("now here" became "nowhere"). Split them again. Rejoining letter-spaced type is not a merge.
+- `merged_words` must be empty. Two separate words were joined into one ("now here" became "nowhere"). Split them again. Rejoining letter-spaced type is not a merge, including when OCR chunked two or three letters together inside the run (`C O P Y - P A S TE`, `T O WR ITE`). If a rejoined heading is still reported, the run's first or last piece is an ordinary word rather than display type: look at that one word, and leave the rest of the heading joined.
 - `split_words` are single words the rebuild split in two. Most are words the export glued together, like "MetricoolBONUS"; keep those, undo any other.
 - `inline_drops` are whole words deleted from a line that otherwise survives. Each must be page furniture you removed on purpose, like a handle stuck to a title. A deleted "not" or "no" flips the meaning: put it back.
 - `dropped_lines` are whole lines removed. They should all be page furniture.
@@ -137,7 +148,8 @@ Keep it short:
 ## Known limits
 
 - The wording check compares letters and digits, not punctuation. That is why Step 3 never touches code; a changed symbol elsewhere in the text is not caught.
-- Letter-spaced type is recognized by pattern: three or more single characters in a row, separated by plain spaces. Unusual spacing may need a closer look at the `split_words` and `merged_words` lists.
+- Letter-spaced type is recognized by pattern: three or more single characters in a row, separated by plain spaces, with two- or three-letter OCR chunks allowed between them as long as the run still starts on a single character and is mostly single characters. Unusual spacing may need a closer look at the `split_words` and `merged_words` lists.
+- A run may end on one such chunk (`P A S TE:`), so a real two- or three-letter capital word sitting immediately after display type could be absorbed into it without the check objecting. Leading words are never absorbed.
 - Indented code blocks (four spaces, no fence) are not detected. Google's export uses fences, so this rarely matters.
 - Link addresses do not survive Google's export; only the link text does.
 
@@ -145,7 +157,7 @@ Keep it short:
 
 | Step | Composio tool | Note |
 |---|---|---|
-| Find | `GOOGLEDRIVE_FIND_FILE`, `GOOGLEDRIVE_GET_FILE_METADATA` | `fileId` |
+| Find | `GOOGLEDRIVE_FIND_FILE`, `GOOGLEDRIVE_GET_FILE_METADATA` | `fileId`, plus `fields` for `parents` |
 | Wrong account? | `GOOGLEDRIVE_GET_ABOUT` | run on any 404 |
 | PDF to Doc | `GOOGLEDRIVE_COPY_FILE_ADVANCED` | `fileId`, `ocrLanguage` |
 | Export | `GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE` | link expires in 1 hour |
