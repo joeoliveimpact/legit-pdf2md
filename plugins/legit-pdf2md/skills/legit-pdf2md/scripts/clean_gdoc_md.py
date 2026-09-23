@@ -943,7 +943,9 @@ def _group(issues, text):
     for n, b in enumerate(blocks, 1):
         b["id"] = f"b{n}"
         b["after"] = b["after"][:50]
-        b["text"] = "\n".join(l for l in lines[b["lines"][0] - 1:b["lines"][1]] if l.strip())
+        # each line with its number ("171| text"), so the AI can name exact lines; blank lines are left out
+        b["text"] = "\n".join(f"{n}| {l}" for n, l in enumerate(lines[b["lines"][0] - 1:b["lines"][1]], b["lines"][0])
+                              if l.strip())
     return blocks
 
 

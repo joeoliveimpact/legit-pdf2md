@@ -262,6 +262,11 @@ def detached_number_lists_go_to_the_ai(m):
     are after autofix, for the AI to judge."""
     r, _, st = run_pipeline(m, GUIDE)
     assert r["status"] == "needs_host_edits" and "Make a free account. It takes a minute. 1" in st["text"], r["status"]
+    L = st["text"].split("\n")   # every packet line carries its real line number: "12| text"
+    for x in r["issues"]:
+        for row in x["text"].split("\n"):
+            n, _, line = row.partition("| ")
+            assert L[int(n) - 1] == line and x["lines"][0] <= int(n) <= x["lines"][1], (row, x["lines"])
     blk = [x for x in r["issues"] if "suggested_list" in x]
     assert len(blk) == 1 and "number_list" in r["ops_by_type"]["number_list"], blk
     assert blk[0]["suggested_list"][0]["text"].startswith("1. Make a free account. It takes a minute.\n2. Connect"), blk
