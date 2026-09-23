@@ -676,7 +676,7 @@ def _edit(st, a, b, text, op, drops=(), reason=None, movable=None):
             le = len(seg) if le < 0 else le
             word, line = "".join(ca[k] for k in ks), seg[ls:le].strip()
             last = not seg[pa[ks[-1]] - c0 + 1:le].strip()
-            return line == word or bool(last and TRAILING_NUMBER.match(line))
+            return len(word) <= 2 and (line == word or bool(last and TRAILING_NUMBER.match(line)))   # a year is no step
 
         cand = [ks for _, ks in sorted(words.items())
                 if all(ca[k].isdigit() and keep[pa[k] - c0] for k in ks) and standalone(ks)]
@@ -687,22 +687,26 @@ def _edit(st, a, b, text, op, drops=(), reason=None, movable=None):
                 marks.append((m.group(1), [j for j in range(n0, n1) if off + m.start(1) <= pb[j] < off + m.end(1)]))
             off += len(ln) + 1
         mapped = None
-        for _ in (1,):   # markers keep their original order: each is the next stand-alone number after the last one
-            picks, after_k = [], -1
+        for _ in (1,):   # markers keep their original order: each is exactly the next stand-alone number
+            picks, i = [], 0
             for v, js in marks:
-                ks = next((ks for ks in cand if ks[0] > after_k and "".join(ca[k] for k in ks) == v), None)
-                if ks is None or len(ks) != len(js):
+                if i >= len(cand) or "".join(ca[k] for k in cand[i]) != v or len(cand[i]) != len(js):
                     break
-                after_k = ks[-1]
-                picks.append((js, ks))
+                picks.append((js, cand[i], cand[i - 1] if i else None))
+                i += 1
             if len(picks) != len(marks):
                 continue
-            taken_old = {k for _, ks in picks for k in ks}
-            taken_new = {j for js, _ in picks for j in js}
+            taken_old = {k for _, ks, _ in picks for k in ks}
+            taken_new = {j for js, _, _ in picks for j in js}
             rest_old = [k for k in kept if k not in taken_old]
             rest_new = [j for j in range(n0, n1) if j not in taken_new]
-            if "".join(ca[k] for k in rest_old) == "".join(cb[j] for j in rest_new):
-                m_of = {j: lmap[k] for js, ks in picks for j, k in zip(js, ks)}
+            origin = lambda ks: bisect.bisect_left(rest_old, ks[0])
+            # a number may move back to the start of its own item only: not before the number ahead of it, not
+            # past anything after it
+            placed = all((origin(prev) if prev else 0) <= bisect.bisect_left(rest_new, js[0]) <= origin(ks)
+                         for js, ks, prev in picks)
+            if placed and "".join(ca[k] for k in rest_old) == "".join(cb[j] for j in rest_new):
+                m_of = {j: lmap[k] for js, ks, _ in picks for j, k in zip(js, ks)}
                 it = iter(lmap[k] for k in rest_old)
                 mapped = [m_of[j] if j in m_of else next(it) for j in range(n0, n1)]
                 break
@@ -922,6 +926,7 @@ def _group(issues, text):
             b["ops"] = sorted(set(b["ops"]) | set(x["ops"]))
             b["context_lines"][1] = x["context_lines"][1]
             b["flagged"] += list(range(x["lines"][0], x["lines"][1] + 1))
+            b["movable"] += list(range(x["lines"][0], x["lines"][1] + 1)) if "move_heading" in x["ops"] else []
             b["after"] = x["after"]
             if "suggested_drop" in x:
                 b.setdefault("suggested_drop", []).append(x["suggested_drop"])
@@ -929,6 +934,7 @@ def _group(issues, text):
             blocks.append({"types": [x["type"]], "lines": list(x["lines"]), "before": x["before"][:50],
                            "after": x["after"], "ops": list(x["ops"]), "context_lines": list(x["context_lines"]),
                            "flagged": list(range(x["lines"][0], x["lines"][1] + 1)),
+                           "movable": list(range(x["lines"][0], x["lines"][1] + 1)) if "move_heading" in x["ops"] else [],
                            "safe_autofix": False, **({"suggested_drop": [x["suggested_drop"]]} if "suggested_drop" in x else {})})
     for n, b in enumerate(blocks, 1):
         b["id"] = f"b{n}"
@@ -967,7 +973,7 @@ def _apply(st, edits, issues=None):
             if not all(e.get("op") in x["ops"] or x["safe_autofix"] for x in refs):
                 errors.append(f"edit {n}: op {e.get('op')!r} is not allowed for {ids}")
                 continue
-            e = {**e, "_movable": {ln for x in refs for ln in x["flagged"]}}   # only flagged lines may move
+            e = {**e, "_movable": {ln for x in refs for ln in x["movable"]}}   # only lines of a move-allowed type may move
         spans.append((a, b, n, e))
     spans.sort(key=lambda s: -s[0])
     for (a, b, n, _), (a2, b2, n2, _) in zip(spans, spans[1:]):

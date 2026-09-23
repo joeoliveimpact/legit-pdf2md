@@ -429,6 +429,26 @@ def reconcile_edge_cases(m):
         st = m._new_state("Alpha item\n\n1\n\nBeta item\n\n2\n")   # markers keep their order
         assert m._apply(st, [{"op": "number_list", "lines": [1, 7], "text": "2. Alpha item\n1. Beta item"}]), "markers swapped"
         assert not m._apply(st, [{"op": "number_list", "lines": [1, 7], "text": "1. Alpha item\n2. Beta item"}])
+        st = m._new_state("Alpha item\n\n1\n\nBeta item\n\n2\n\nGamma item\n\n3\n")   # markers keep order, stay home
+        for bad in ("2. Alpha item\n\n1\n\nBeta item\n\n3. Gamma item", "Alpha item\n\n2. Beta item\n\n3. Gamma item\n\n1"):
+            assert m._apply(st, [{"op": "number_list", "lines": [1, 11], "text": bad}]), bad
+        assert not m._apply(st, [{"op": "number_list", "lines": [1, 11], "text": "1. Alpha item\n2. Beta item\n3. Gamma item"}])
+        st = m._new_state("Launched in\n2026\n\n5\n\nNext step here.\n")   # a year is not a step number
+        assert m._apply(st, [{"op": "number_list", "lines": [2, 6], "text": "\n5\n\n2026. Next step here."}]), "year lifted"
+        st = m._new_state("Launched in\n\n2026\n\nNext step here.\n")
+        assert m._apply(st, [{"op": "number_list", "lines": [1, 5], "text": "Launched in\n\n2026. Next step here."}]), "year"
+        st = m._new_state("Alpha item\n\n1\n\nBeta item\n\nGamma item\n")   # a marker cannot travel past other items
+        assert m._apply(st, [{"op": "number_list", "lines": [1, 7], "text": "Alpha item\n\nBeta item\n\n1. Gamma item"}])
+        # a sentence line flagged by another issue type (code label) is not movable next to a letter-spaced line
+        exp = "Intro line.\n\nStep one: unplug.\nStep two: press `RESET`.\nW H Y\nStep three: wait.\n\nEnd.\n"
+        p3 = os.path.join(d, "v.json")
+        m.pipeline(exp, p3)
+        st = m._load_state(p3)
+        L = st["text"].split("\n")
+        a, b = L.index("Step one: unplug.") + 1, L.index("Step three: wait.") + 1
+        blk = next(x for x in st["issues"] if x["lines"][0] <= a + 1 <= x["lines"][1])
+        assert m._apply(st, [{"issue": blk["id"], "op": "move_heading", "lines": [a, b],
+                               "text": "Step two: press `RESET`.\nStep one: unplug.\nW H Y\nStep three: wait."}], st["issues"])
         # only flagged lines may move: a plain sentence line next to a flagged heading stays where it is
         exp = "Intro line.\n\nDo not\nW H Y\npress the red button.\n\nEnd.\n"
         p2 = os.path.join(d, "u.json")
