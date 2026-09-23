@@ -20,7 +20,7 @@ Read this when a Composio call fails validation, when you need a tool's name for
 | Export | `GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE` | link expires in 1 hour |
 | Clean up temp Doc | `GOOGLEDRIVE_TRASH_FILE` | `file_id`, not `fileId` |
 | Run a tool via the connector | `COMPOSIO_MULTI_EXECUTE_TOOL` | pass `tool_slug`, `arguments`, `account` |
-| Run script remotely | `COMPOSIO_REMOTE_WORKBENCH` | chat app; script from the repo raw URL |
+| Run the script | `COMPOSIO_REMOTE_WORKBENCH` | every path; each cell fetches the export and the script itself |
 | Save | `GOOGLEDRIVE_CREATE_FILE_FROM_TEXT` | `parent_id` |
 
 Parameter casing differs between these tools; when a call fails validation, read that tool's schema rather than assuming (`--get-schema` on the CLI). Every `GOOGLEDRIVE_*` tool above works unchanged through the Composio MCP connection and through the CLI (`composio execute <TOOL> -d '{...}'`), which is why Step 0 only has to decide which one is live.

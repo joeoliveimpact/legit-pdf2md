@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 - 2026-09-22
+
+**The cleanup now always runs in Composio.** Every path (Claude chat, Cowork, Claude Code, ChatGPT; the MCP connector or the CLI) runs the script in Composio's remote workbench. Nothing runs on your computer, so no Python and no coding setup are needed anywhere, and the Windows "Python was not found" problem is gone.
+
+- **Each workbench step is self-contained.** On the CLI every workbench call is a fresh sandbox, so files do not carry over. Steps 3 and 5 now fetch the export and the script themselves, and Step 5 passes the rebuilt text in.
+- **Local Python is only used for a file you exported by hand**, which the workbench cannot see.
+- Proven end to end through the CLI on a real 12-page PDF: 19,354 tokens in, 3,903 out after strip; the wording check passed on the rebuild and failed, as it should, on a copy with one invented word.
+
 ## 0.1.2 - 2026-09-22
 
 - **Windows: use `py -3`.** On Windows, `python` and `python3` are often Microsoft Store shortcuts that print "Python was not found" and run nothing. SKILL.md and the README now say to use the `py` launcher there, and what that message means when it appears.
