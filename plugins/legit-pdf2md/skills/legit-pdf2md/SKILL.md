@@ -5,10 +5,12 @@ description: Turn a Google Doc, or a PDF stored in Google Drive (including scann
 
 # Google Doc or Drive PDF to clean Markdown
 
+This is version 0.1.4 of the skill.
+
 ## Output contract
 
 Done means all four of these:
-1. A new file named `<original title> - clean.md` in the **same Drive folder** as the source. If the user handed you a local `.md` instead, save it beside that file as `<file name> - clean.md`.
+1. A new file named `<original title> - clean.md` (Step 6 has the naming rule) in the **same Drive folder** as the source. If the user handed you a local `.md` instead, save it beside that file as `<file name> - clean.md`.
 2. The wording is the source's wording. Nothing reworded, summarized, corrected or added.
 3. The wording check (Step 5) passed.
 4. A short report to the user: tokens before and after, what was fixed, what could not be recovered, the file link (or local path), and "start a new chat and add this file."
@@ -88,7 +90,7 @@ then print the script's JSON output and the contents of `clean.md`. The stripped
 
 **Local-file route** (the user handed you a `.md`, no Composio needed): the workbench cannot see a local file, so use this session's own Python (the chat app's code execution, or `python3`; `py -3` on Windows) with the script in this skill's `scripts/` folder: `strip <their file> -o clean.md` here, and `check <their file> clean.md` in Step 5. Skip Step 6: save the clean file beside theirs, or in the chat app offer it as a download. No Python at all: say so and stop.
 
-It works outside fenced code blocks only; code blocks (including ones inside quotes and lists) and inline code are never touched. It removes base64 images (leaving `[image N]` placeholders), `&nbsp;` and other entities, broken characters, Google's backslash escapes, the code-font backticks the Drive API export wraps around letter-spaced text and bare step numbers, asterisks that OCR scatters between letters, trailing spaces and extra blank lines. It never changes wording. It prints JSON with `stats` and a `worklist`.
+It works outside fenced code blocks only; code blocks (including ones inside quotes and lists) and inline code are never touched, except code formatting that holds nothing but pictures. It removes base64 images (leaving `[image N]` placeholders, each on its own line outside list items, headings, quotes and tables), `&nbsp;` and other entities, broken characters, Google's backslash escapes, the code-font backticks the Drive API export wraps around letter-spaced text and bare step numbers, asterisks that OCR scatters between letters, trailing spaces and extra blank lines. It never changes wording. It prints JSON with `stats` and a `worklist`.
 
 ## Step 4: Rebuild the structure (judgment)
 
@@ -133,17 +135,18 @@ Run it on the **rebuilt** file. On Step 3's raw output it can fail on purpose: a
 - `inline_drops` are whole words deleted from a line that otherwise survives. Each must be page furniture you removed on purpose, like a handle stuck to a title. A deleted "not" or "no" flips the meaning: put it back.
 - `dropped_lines` are whole lines removed. They should all be page furniture.
 - `moved_runs` lists text that changed place. Each one needs a line in the report.
+- `images` must show `ok: true`: every picture in the export is still an `[image N]` placeholder, in the same order, none added (`missing`, `invented`, `in_order`). Keep the placeholder even when you remove the page furniture around it. `kept_in_code` lists pictures the export put inside code formatting next to text; they cannot be recovered, so name them in the report.
 
 ## Step 6: Save it back to Drive
 
-Call `GOOGLEDRIVE_CREATE_FILE_FROM_TEXT` with `file_name` `<original title> - clean.md`, `text_content` the clean Markdown, `mime_type` `text/markdown`, and `parent_id` the folder ID from Step 1.
+Call `GOOGLEDRIVE_CREATE_FILE_FROM_TEXT` with `file_name` `<original title> - clean.md`, where a PDF's title loses a trailing `.pdf` (any case) first (`Guide.pdf` becomes `Guide - clean.md`) and nothing else is ever cut (`Notes 09.11.26` becomes `Notes 09.11.26 - clean.md`), `text_content` the clean Markdown, `mime_type` `text/markdown`, and `parent_id` the folder ID from Step 1.
 
 ## Step 7: Report
 
 Keep it short:
 - Estimated tokens before and after (from `stats`).
 - What was fixed, using the `stats` counts plus how many lines you edited.
-- **What could not be recovered**, every time: link addresses (only the link text survives the export), any scrambled spots you left in place, and whether a temporary Doc was made and trashed.
+- **What could not be recovered**, every time: link addresses (only the link text survives the export), pictures listed in `kept_in_code`, any scrambled spots you left in place, and whether a temporary Doc was made and trashed.
 - The check result.
 - The file link, and: "Start a new chat and add this file instead of the PDF." For a local file with no Drive link, say where the clean file was saved.
 

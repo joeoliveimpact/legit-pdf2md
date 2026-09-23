@@ -2,15 +2,20 @@
 """Clean a Google Docs Markdown export. Standard library only.
 
   clean_gdoc_md.py strip INPUT -o OUTPUT   remove export junk, print stats + a rebuild worklist (JSON)
-  clean_gdoc_md.py check SOURCE CLEANED    compare wording; exit 1 if anything was invented, cut or merged
+  clean_gdoc_md.py check SOURCE CLEANED    compare wording and images; exit 1 if anything was invented, cut or
+                                           merged, or an image was lost, invented or reordered
   clean_gdoc_md.py selftest                prove strip and check both work
+  clean_gdoc_md.py --version               print the version
 
 strip never changes wording. Outside fenced code blocks it removes base64 images (kept as
 [image N] placeholders), HTML entities like &nbsp;, broken characters, Google's backslash
 escapes, code-font backticks around letter-spaced text and bare numbers, stray OCR asterisks
 between letters, trailing spaces, and extra blank lines. Fenced code blocks (also inside quotes
-and lists) and inline code are left untouched. The worklist names the lines that need judgment.
+and lists) and inline code are left untouched, except inline code holding nothing but images. Each image placeholder gets its own
+line, except inside list items, headings, quotes and tables. The worklist names the lines that need judgment.
 """
+__version__ = "0.1.4"
+
 import argparse, bisect, collections, difflib, html, json, os, re, secrets, subprocess, sys, tempfile, unicodedata
 
 DATA_DEF = re.compile(r"^\[image(\d+)\]:[ \t]*<?data:image/[^\s>]*>?[ \t]*$", re.M)   # base64 image definition only
@@ -34,6 +39,10 @@ FENCE_OPEN = re.compile(r"^(?:[ ]{0,3}>[ ]?)*([ \t]*)((?:[-*+]|\d+[.)])[ \t]+)?(
 FENCE_CLOSE = re.compile(r"^(?:[ ]{0,3}>[ ]?)*[ \t]*(`{3,}|~{3,})[ \t]*$")
 ASTERISK_RUN = re.compile(r"\*+")
 BLOCK_LINE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|#|>|\||\[image \d+\])")   # list items, headings, quotes, tables, images
+IMAGE_ONLY = re.compile(r"\s*(?:" + REF_USE.pattern + r"\s*)+")                 # `![][image6]![][image7]`
+IMAGE_TOKEN = re.compile(f"{REF_USE.pattern}|{INLINE_DATA.pattern}|{PLACEHOLDER.pattern}")
+CONTAINER_LINE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|#|>|\|)")   # list item, heading, quote, table: images stay inline
+BLOCK_START = re.compile(r"^(?:[-*+](?:\s|$)|\d+[.)](?:\s|$)|#|>|\||[-=*_ ]+$|```|~~~)")   # text that would become syntax
 JOINERS = "\0\ufffd\u200b\u200c\u200d\ufeff"   # removed by strip without splitting a word, so check joins across them
 
 
@@ -86,7 +95,37 @@ def _blocks(lines):
     return blocks
 
 
+def _blank(m):   # same length, line breaks kept
+    return re.sub("[^\n]", " ", m.group(0))
+
+
+def _image_only(code, defined):
+    """Inline code holding nothing but references to defined images: the export's code font around pictures."""
+    return bool(IMAGE_ONLY.fullmatch(code)) and all(i in defined for i in REF_USE.findall(code))
+
+
 # ---------------------------------------------------------------- strip
+
+def _split_images(text):
+    """Give each placeholder its own line (a single line break, so the paragraph renders the same). Lines that
+    are list items, headings, quotes or tables keep theirs inline, and text that would turn into syntax on a
+    line of its own ("- x", "# x", "---") stays after its placeholder."""
+    out = []
+    for line in text.split("\n"):
+        if not PLACEHOLDER.search(line) or CONTAINER_LINE.match(line):
+            out.append(line)
+            continue
+        indent, new = line[:len(line) - len(line.lstrip())], []   # an indented line stays inside its list item
+        for piece in (p.strip() for p in re.split(r"(\[image \d+\])", line)):
+            if not piece:
+                continue
+            if new and not PLACEHOLDER.fullmatch(piece) and BLOCK_START.match(piece):
+                new[-1] += " " + piece
+            else:
+                new.append(piece)
+        out.extend(indent + p for p in new)
+    return "\n".join(out)
+
 
 def _unescape_line(line):
     m = LINE_HEAD_ESC.match(line)
@@ -135,24 +174,30 @@ def _clean_prose(text, s):
 
 def strip(text):
     s = collections.Counter({k: 0 for k in ("code_spans_unwrapped", "nbsp_chars", "html_entities", "broken_chars",
-                                           "escapes", "ocr_asterisks", "inline_images")})
+                                           "escapes", "ocr_asterisks", "inline_images", "image_spans_unwrapped")})
     s["chars_in"] = len(text)
     text = text.replace("\r\n", "\n")
     nonce = secrets.token_hex(8)
     while nonce in text:
         nonce = secrets.token_hex(8)
     left, right = f"\ue000{nonce}:", "\ue001"
-    kept = []
+    kept, in_code = [], []
+    raw_blocks = _blocks(text.split("\n"))
+    defined = set(DATA_DEF.findall(CODE_SPAN.sub(_blank, "\n".join(l for p, ls in raw_blocks if p for l in ls))))
 
-    def _mask(m):   # display labels lose their backticks; real inline code is set aside untouched
+    def _mask(m):   # display labels and image-only spans lose their backticks; real inline code is set aside untouched
         c = m.group(2)
+        if _image_only(c, defined):
+            s["image_spans_unwrapped"] += 1
+            return c
         if SPACED.search(c) or re.fullmatch(r"\s*\d{1,3}\s*", c):
             s["code_spans_unwrapped"] += 1
             return c
+        in_code.extend(i for i in REF_USE.findall(c) if i in defined)
         kept.append(m.group(0))
         return f"{left}{len(kept) - 1}{right}"
 
-    blocks = [(p, CODE_SPAN.sub(_mask, "\n".join(lines)) if p else "\n".join(lines)) for p, lines in _blocks(text.split("\n"))]
+    blocks = [(p, CODE_SPAN.sub(_mask, "\n".join(lines)) if p else "\n".join(lines)) for p, lines in raw_blocks]
     prose = "\n".join(t for p, t in blocks if p)
     data_ids = set(DATA_DEF.findall(prose))
     s["image_definitions"] = len(DATA_DEF.findall(prose))
@@ -167,12 +212,13 @@ def strip(text):
         if p:
             t, n = INLINE_DATA.subn(lambda m: f"[image {next(nxt)}] ", t)
             s["inline_images"] += n
-            t = _clean_prose(BOLD_WRAP.sub(r"\1", t), s)
+            t = _clean_prose(_split_images(BOLD_WRAP.sub(r"\1", t)), s)
             t = unmask.sub(lambda m: kept[int(m.group(1))] if int(m.group(1)) < len(kept) else m.group(0), t)
         parts.append(t)
     text = "\n".join(parts).lstrip("\n").rstrip() + "\n"
     s["chars_out"] = len(text)
     s["est_tokens_in"], s["est_tokens_out"] = s["chars_in"] // 4, s["chars_out"] // 4
+    s["images_kept_in_code"] = in_code   # their definitions are gone, so the picture is lost: name them in the report
     return text, dict(s)
 
 
@@ -253,7 +299,7 @@ def _prepare(text):
         parts, last = [], 0
         for m in CODE_SPAN.finditer(blk):
             parts.append(_segment(blk[last:m.start()]))
-            parts.append(m.group(0))
+            parts.append(_segment(m.group(0)) if _image_only(m.group(2), ids) else m.group(0))
             last = m.end()
         parts.append(_segment(blk[last:]))
         new_lines = "".join(parts).split("\n")
@@ -421,12 +467,61 @@ def _pair_moves(a, abound, b, bbound, drops, adds, ct, bpos):
     return moved, unmatched, drops
 
 
+def _images(text):
+    """The document's images in reading order as placeholder ids, read straight from the text and never from
+    strip's output: base64 references (also in inline code holding nothing but images), inline data images
+    numbered the way strip numbers them, and [image N] placeholders. Fenced code is ignored. Also returns the
+    images left inside other inline code, whose pictures strip cannot keep."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    prose = "\n".join(l if k == "prose" else "" for l, k in zip(lines, _line_kinds(lines)))
+    defined = set(DATA_DEF.findall(CODE_SPAN.sub(_blank, prose)))
+    found, kept, last = [], [], 0
+
+    def scan(seg):
+        for m in IMAGE_TOKEN.finditer(seg):
+            ref, ph = REF_USE.fullmatch(m.group(0)), PLACEHOLDER.fullmatch(m.group(0))
+            if ref:
+                if ref.group(1) in defined:
+                    found.append(ref.group(1))
+            else:
+                found.append(re.search(r"\d+", ph.group(0)).group(0) if ph else None)   # None: inline data
+
+    for m in CODE_SPAN.finditer(prose):
+        scan(prose[last:m.start()])
+        if _image_only(m.group(2), defined):
+            scan(m.group(2))
+        else:
+            kept += [i for i in REF_USE.findall(m.group(2)) if i in defined]   # inline data in code keeps its picture
+        last = m.end()
+    scan(prose[last:])
+    nxt = iter(range(max((int(i) for i in found if i), default=0) + 1, 10**6))
+    return [i or str(next(nxt)) for i in found], kept
+
+
+def image_gate(source, cleaned):
+    """Every image in the source must be a placeholder in the cleaned text, in the same order, none invented.
+    An image the source itself repeats is expected as often as the source has it."""
+    src, kept = _images(source)
+    out = _images(cleaned)[0]
+    missing = list((collections.Counter(src) - collections.Counter(out)).elements())
+    invented = list((collections.Counter(out) - collections.Counter(src)).elements())
+    a, b = list(src), list(out)
+    for x in missing:
+        a.remove(x)
+    for x in invented:
+        b.remove(x)
+    return {"source": src, "cleaned": out, "missing": missing, "invented": invented, "in_order": a == b,
+            "kept_in_code": kept, "ok": not missing and not invented and a == b}
+
+
 def check(source, cleaned):
     """Compare wording, in any script, ignoring spacing, case, Markdown and removed junk.
     FAILS on: any added letter or digit that is not a whole-word move of deleted text; a deletion that cuts
     inside a word; two ordinary words merged into one (also inside moved text). REPORTS for review: whole
     words deleted inside a surviving line (inline_drops), whole lines deleted (dropped_lines), and one word
-    split into two (split_words). Punctuation is not compared; code is compared exactly as written."""
+    split into two (split_words). Punctuation is not compared; code is compared exactly as written.
+    Also FAILS when an image is lost, invented or reordered (images). drop_spans gives every deletion's letter
+    range in the source's letter stream and its character range in the source (line breaks as LF), untruncated."""
     st, a, apos, abound = _stream(source)
     ct, b, bpos, bbound = _stream(cleaned)
     ops = difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
@@ -453,9 +548,10 @@ def check(source, cleaned):
         for k in range(1, j2 - j1):
             compare(s0 + k, j1 + k)
     dropped_idx = {i for i1, i2 in drops for i in range(i1, i2)}
-    partial, inline, lines = [], [], []
+    partial, inline, lines, spans = [], [], [], []
     for i1, i2 in drops:
         frag = _show(a, abound, i1, i2)
+        spans.append({"kind": "partial", "letters": [i1, i2], "chars": [apos[i1], apos[i2 - 1] + 1], "text": frag})
         if re.search(r"[^\W\d_]", frag) and not _whole_word(a, abound, i1, i2):
             partial.append(frag)
             continue
@@ -464,11 +560,21 @@ def check(source, cleaned):
         le = len(st) if le < 0 else le
         survivors = any(ls <= p < le and k not in dropped_idx for k, p in enumerate(apos))
         (inline if survivors else lines).append(frag[:80])
-    return {"source_letters": len(a), "cleaned_letters": len(b),
+        spans[-1]["kind"] = "inline" if survivors else "line"
+    images = image_gate(source, cleaned)
+    return {"version": __version__, "source_letters": len(a), "cleaned_letters": len(b),
             "added_runs": [_show(b, bbound, x, y) for x, y in added], "partial_word_drops": partial,
             "merged_words": merged, "moved_runs": [_show(b, bbound, x, y) for x, y, _ in moved],
-            "split_words": split, "inline_drops": inline, "dropped_lines": lines,
-            "ok": not added and not partial and not merged}
+            "split_words": split, "inline_drops": inline, "dropped_lines": lines, "drop_spans": spans,
+            "images": images, "ok": not added and not partial and not merged and images["ok"]}
+
+
+def clean_name(title, mime_type):
+    """The clean file's name: the source's title, minus a trailing .pdf only when the source is a PDF (a dated
+    title like "Notes 09.11.26" keeps every part), plus " - clean.md"."""
+    if mime_type == "application/pdf" and title.lower().endswith(".pdf"):
+        title = title[:-4]
+    return f"{title} - clean.md"
 
 
 # ---------------------------------------------------------------- selftest
@@ -483,7 +589,7 @@ def selftest():
     out, st = strip(src)
     for bad in ("&nbsp;", "\ufffd", "base64", "![]", "\\["):
         assert bad not in out, bad
-    assert "[image 1] Fathom # 1" in out and "[ADMIN]" in out and "\n\n\n" not in out, out
+    assert "[image 1]\nFathom # 1" in out and "[ADMIN]" in out and "\n\n\n" not in out, out
     assert "\n**C R A W L I N G**\n" in out, "broken chars at line start go without leaving a leading space"
     assert "Contract **bold** text" in out, "stray OCR asterisk out, real bold kept"
     assert st["image_definitions"] == 1 and st["image_refs"] == 1 and st["html_entities"] == 3 and st["broken_chars"] == 2, st
@@ -531,7 +637,7 @@ def selftest():
     assert strip(link)[0].strip() == link
     # inline data image and zero-width chars
     o, s2 = strip("See ![](data:image/png;base64,AAAA) here a\u200bb")
-    assert o.strip() == "See [image 1] here ab" and s2["inline_images"] == 1, (o, s2)
+    assert o.strip() == "See\n[image 1]\nhere ab" and s2["inline_images"] == 1, (o, s2)
     # worklist: repeated lines, odd asterisks, all-caps code spans, split sentences; GMC-018 lists never split
     w2 = worklist("Same line\n\nSame line\n\nSame line\n\nMatch file*.md.\n\n`CONTENT` Made\n\n`Paste the prompt`\n\n`somewhere else.`\n")
     assert w2["repeated_lines"] == [{"text": "Same line", "count": 3}], w2["repeated_lines"]
@@ -640,6 +746,7 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")  # Windows consoles default to cp1252 and crash on emoji
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version=__version__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("strip"); p.add_argument("input"); p.add_argument("-o", "--output", required=True)
     c = sub.add_parser("check"); c.add_argument("source"); c.add_argument("cleaned")
@@ -650,7 +757,7 @@ def main():
     if a.cmd == "strip":
         out, st = strip(open(a.input, encoding="utf-8").read())
         open(a.output, "w", encoding="utf-8", newline="\n").write(out)
-        print(json.dumps({"stats": st, "worklist": worklist(out)}, ensure_ascii=False, indent=1))
+        print(json.dumps({"version": __version__, "stats": st, "worklist": worklist(out)}, ensure_ascii=False, indent=1))
     else:
         r = check(open(a.source, encoding="utf-8").read(), open(a.cleaned, encoding="utf-8").read())
         print(json.dumps(r, ensure_ascii=False, indent=1))
