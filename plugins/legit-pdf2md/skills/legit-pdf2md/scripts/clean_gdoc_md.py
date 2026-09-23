@@ -983,6 +983,16 @@ def reconcile(st, export):
         if blank[i] and (i + 1 == len(export) or not blank[i + 1]):
             out.append("\x01")
     r = check("".join(out), st["text"])
+    # A second, alignment-free merge test from the letter map: two letters in one word of the result whose export
+    # positions have a real (hard) word break between them are merged words. Blanking cannot move run grouping
+    # here, because nothing is re-read. Runs only while the map matches the text (every edit keeps it so).
+    _, b, _, bb = _stream(st["text"])
+    lm = st["lmap"]
+    if len(lm) == len(b) and all(0 <= x < len(a) and a[x] == c for x, c in zip(lm, b)):
+        for j in range(1, len(b)):
+            e1, e2 = lm[j - 1], lm[j]
+            if bb[j] is None and e2 != e1 and (e2 < e1 or any(_resolve(ab[k], bb, j) == "hard" for k in range(e1 + 1, e2 + 1))):
+                r["merged_words"].append(_show(b, bb, max(0, j - 12), min(len(b), j + 12)))
     r["images"] = image_gate(export, st["text"])   # belt and braces: blanking never touches image tokens today,
     r["partial_word_drops"] += partial              # so this equals the gate on the blanked text, but it cannot drift
     r["ok"] = not r["added_runs"] and not r["partial_word_drops"] and not r["merged_words"] and r["images"]["ok"]
@@ -1022,6 +1032,19 @@ def _load_state(path):
     return st
 
 
+def _valid_state(st):
+    """A state file is used only if every field has the shape this script writes."""
+    try:
+        return (isinstance(st, dict) and all(k in st for k in ("stage", "text", "lmap", "ledger", "audit", "source_sha256"))
+                and isinstance(st["text"], str) and isinstance(st["audit"], list) and isinstance(st["lmap"], list)
+                and all(isinstance(x, int) for x in st["lmap"])
+                and isinstance(st.get("nav_openings", []), list) and all(isinstance(o, str) for o in st.get("nav_openings", []))
+                and all(isinstance(x["letters"][0], int) and isinstance(x["letters"][1], int) and isinstance(x["reason"], str)
+                        for x in st["ledger"]))
+    except (KeyError, TypeError, IndexError):
+        return False
+
+
 def _host_issues(st):
     """The AI's issues for the current text, always recomputed, so line numbers never go stale."""
     st["issues"] = _group([x for x in analyze(st["text"], st.get("nav_openings", ())) if not x["safe_autofix"]], st["text"])
@@ -1043,9 +1066,7 @@ def pipeline(export, state_path, final=False):
     export = export.replace("\r\n", "\n")
     try:
         st = _load_state(state_path) if os.path.exists(state_path) else None
-        assert st is None or all(k in st for k in ("stage", "text", "lmap", "ledger", "audit", "source_sha256"))
-        assert st is None or (isinstance(st["text"], str) and isinstance(st.get("nav_openings", []), list) and
-                              all(isinstance(x["letters"][0], int) and isinstance(x["reason"], str) for x in st["ledger"]))
+        assert st is None or _valid_state(st)
     except (ValueError, KeyError, TypeError, AttributeError, AssertionError):   # damaged: start again from the export
         st = None
     if not st or st.get("source_sha256") != _sha(export) or st.get("version") != __version__:
@@ -1270,7 +1291,9 @@ def main():
         try:
             st = _load_state(a.state)
             edits = json.load(open(a.edits, encoding="utf-8"))
-        except (OSError, ValueError, KeyError, TypeError) as err:
+            if not _valid_state(st):
+                raise ValueError("the state file is damaged; run pipeline again to rebuild it")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as err:
             print(json.dumps({"version": __version__, "applied": False, "errors": [f"cannot read: {err}"]}))
             sys.exit(1)
         rev = _sha(st["text"])[:12]

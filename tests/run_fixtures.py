@@ -377,6 +377,21 @@ def reconcile_edge_cases(m):
         for junk in ("{half", "[]", '{"stage": "stripped"}'):
             open(p, "w", encoding="utf-8").write(junk)
             assert m.pipeline(GUIDE, p, final=True)["status"] == "validated", junk
+        # apply-edits on a damaged state or a malformed batch: a clean refusal, never a traceback
+        good = m._load_state(p)
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        e = os.path.join(d, "e.json")
+        for field, bad in (("text", 5), ("nav_openings", [5]), ("audit", None)):
+            m._save_state(p, {**good, field: bad})
+            json.dump({"rev": "x", "edits": []}, open(e, "w", encoding="utf-8"))
+            r = subprocess.run([sys.executable, m.__file__, "apply-edits", e, "--state", p], env=env,
+                               capture_output=True, text=True, encoding="utf-8", timeout=120)
+            assert r.returncode == 1 and "Traceback" not in r.stderr and "damaged" in r.stdout, (field, r.stderr[-300:])
+        m._save_state(p, good)
+        json.dump({"rev": m._sha(good["text"])[:12], "edits": 5}, open(e, "w", encoding="utf-8"))
+        r = subprocess.run([sys.executable, m.__file__, "apply-edits", e, "--state", p], env=env,
+                           capture_output=True, text=True, encoding="utf-8", timeout=120)
+        assert r.returncode == 1 and "Traceback" not in r.stderr and "list of objects" in r.stdout, r.stderr[-300:]
     exp = "`KEEP` x `big**word** here` end of line.\n"
     st = m._new_state(exp)
     line = st["text"].split("\n")[0]
@@ -395,7 +410,8 @@ def reconcile_edge_cases(m):
     # a logged word between single letters must not turn them into one letter-spaced run that hides a merge
     for exp, drop, text in (("Grades A B and C are fine.\n", "and ", "Grades A BC are fine."),
                             ("Plans 1 2 and 3 today.\n", "and ", "Plans 1 23 today."),
-                            ("Grades A B x C are fine.\n", "x ", "Grades A BC are fine.")):
+                            ("Grades A B x C are fine.\n", "x ", "Grades A BC are fine."),
+                            ("A BC DE FG HI JK 1 2 3 today.\n", "JK ", "A BC DE FG HI 1 23 today.")):
         st = m._new_state(exp)
         assert not m._apply(st, [{"op": "replace", "lines": [1, 1], "drops": [drop], "reason": "x", "text": text}])
         assert not m.reconcile(st, exp)[0]["ok"], text
