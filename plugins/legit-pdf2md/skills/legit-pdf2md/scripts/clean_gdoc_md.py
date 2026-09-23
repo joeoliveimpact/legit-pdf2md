@@ -897,7 +897,8 @@ def _apply(st, edits, issues=None):
         try:
             a, b = e["lines"]
             assert isinstance(a, int) and isinstance(b, int) and isinstance(e.get("text", ""), str)
-            assert all(isinstance(d, str) for d in e.get("drops") or ())
+            assert isinstance(e.get("drops") or [], list) and all(isinstance(d, str) for d in e.get("drops") or ())
+            assert isinstance(e.get("op"), str) and isinstance(e.get("reason") or "", str)
         except (KeyError, TypeError, ValueError, AssertionError, AttributeError):
             errors.append(f"edit {n}: needs lines [first, last] as numbers, text and drops as strings")
             continue
@@ -961,19 +962,27 @@ def reconcile(st, export):
     on the full export, so a logged deletion can never hide a lost picture."""
     export = export.replace("\r\n", "\n")
     _, a, apos, ab = _stream(export)
-    chars, partial, deleted = list(export), [], []
+    blank, partial, deleted = [False] * len(export), [], []
     for e in st["ledger"]:
         x0, x1 = e["letters"]
         deleted.append({"reason": e["reason"], "text": _show(a, ab, x0, x1)})
-        if not _whole_word(a, ab, x0, x1):
+        if not _bounded(a, ab, x0, x1):   # exact positions, no sliding onto a lookalike: a cut into a word fails
             partial.append(deleted[-1]["text"])
         for p in sorted({apos[k] for k in range(x0, x1)}):   # blank the letters only: backticks and other
             m = ENTITY.match(export, p) if export[p] == "&" else None   # Markdown stay, so no code span shifts
             end = m.end() if m else p + 1
             while end < len(export) and unicodedata.category(export[end]).startswith("M"):
                 end += 1
-            chars[p:end] = ["\0"] * (end - p)   # NUL: the check skips it, and a line of it is never blank
-    r = check("".join(chars), st["text"])
+            blank[p:end] = [True] * (end - p)
+    # each blanked run becomes \x01 per character plus one more: never whitespace (a line never turns blank, so
+    # inline code never re-pairs), never a letter, and always at least two symbols wide, so the letters either
+    # side can never read as one letter-spaced run ("A B [and] C") in which joining them would pass
+    out = []
+    for i, ch in enumerate(export):
+        out.append("\x01" if blank[i] else ch)
+        if blank[i] and (i + 1 == len(export) or not blank[i + 1]):
+            out.append("\x01")
+    r = check("".join(out), st["text"])
     r["images"] = image_gate(export, st["text"])   # belt and braces: blanking never touches image tokens today,
     r["partial_word_drops"] += partial              # so this equals the gate on the blanked text, but it cannot drift
     r["ok"] = not r["added_runs"] and not r["partial_word_drops"] and not r["merged_words"] and r["images"]["ok"]
@@ -1035,6 +1044,8 @@ def pipeline(export, state_path, final=False):
     try:
         st = _load_state(state_path) if os.path.exists(state_path) else None
         assert st is None or all(k in st for k in ("stage", "text", "lmap", "ledger", "audit", "source_sha256"))
+        assert st is None or (isinstance(st["text"], str) and isinstance(st.get("nav_openings", []), list) and
+                              all(isinstance(x["letters"][0], int) and isinstance(x["reason"], str) for x in st["ledger"]))
     except (ValueError, KeyError, TypeError, AttributeError, AssertionError):   # damaged: start again from the export
         st = None
     if not st or st.get("source_sha256") != _sha(export) or st.get("version") != __version__:
@@ -1267,7 +1278,9 @@ def main():
             errors = [f"stale or missing rev: these edits were written for another version of the text; "
                       f"use the issues from the newest pipeline or apply-edits output (rev {rev})"]
         else:
-            errors = _apply(st, edits.get("edits") or [], _host_issues(st))
+            batch = edits.get("edits") or []
+            ok_shape = isinstance(batch, list) and all(isinstance(e, dict) for e in batch)
+            errors = _apply(st, batch, _host_issues(st)) if ok_shape else ["edits must be a list of objects"]
         if not errors:
             st["stage"] = "edited"
             _host_issues(st)   # the next batch is checked against the new line numbers

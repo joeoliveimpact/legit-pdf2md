@@ -392,6 +392,19 @@ def reconcile_edge_cases(m):
     st["text"] = st["text"].replace(" ![Revenue doubled][image1]", "")   # an unlogged deletion
     r, unexplained = m.reconcile(st, exp)
     assert not r["ok"] or unexplained, (r["ok"], unexplained)
+    # a logged word between single letters must not turn them into one letter-spaced run that hides a merge
+    for exp, drop, text in (("Grades A B and C are fine.\n", "and ", "Grades A BC are fine."),
+                            ("Plans 1 2 and 3 today.\n", "and ", "Plans 1 23 today."),
+                            ("Grades A B x C are fine.\n", "x ", "Grades A BC are fine.")):
+        st = m._new_state(exp)
+        assert not m._apply(st, [{"op": "replace", "lines": [1, 1], "drops": [drop], "reason": "x", "text": text}])
+        assert not m.reconcile(st, exp)[0]["ok"], text
+    # a logged letter cut from inside a word fails, even when a lookalike standalone letter sits next to it
+    exp = "W H Y Books s tips\n"
+    st = m._new_state(exp)
+    assert not m._apply(st, [{"op": "replace", "lines": [1, 1], "drops": ["s"], "reason": "x", "text": "W H Y Book s tips"}])
+    r = m.reconcile(st, exp)[0]
+    assert not r["ok"] and r["partial_word_drops"], r
 
 
 @fixture
