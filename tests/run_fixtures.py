@@ -602,7 +602,8 @@ class FakeDrive:
         if slug == "GOOGLEDRIVE_COPY_FILE_ADVANCED":
             self.copies += 1
             tid = f"tmp{self.copies}"
-            self.files[tid] = {"id": tid, "name": a["name"], "mimeType": DOC, "parents": a["parents"], "body": "Export.\r\n"}
+            self.files[tid] = {"id": tid, "name": a["name"], "mimeType": DOC, "parents": a["parents"], "body": "Export.\r\n",
+                               "ocr": a.get("ocrLanguage")}
             return {"data": {"id": tid} if self.copy_id else {"name": a["name"]}}, ""
         if slug == "GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE":
             if self.export_error:
@@ -661,27 +662,24 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
         y.export(os.path.join(d, "b.md"))
         assert x.save(text, ok, "Guide - clean.md")["where"] == "beside the source"   # read-back came back CRLF
         assert fd.created() == [("Guide - clean.md", "fold")] and fd.files["out1"]["body"].endswith("\r\n"), fd.created()
-        fd.corrupt = True   # a second save whose read-back differs locks cleanup again
-        _refused(lambda: mk("src").save(text, ok, "Guide - clean.md"), "second save's bad read-back passed")
-        _refused(lambda: mk("src").cleanup(), "cleanup after a failed second save")
-        fd.corrupt = False
-        mk("src").save(text, ok, "Guide - clean.md")
+        # the save cell run again (after a context reset): the same file back, never a second one
+        assert mk("src").save(text, ok, "Guide - clean.md")["id"] == "out1" and len(fd.created()) == 1
+        other = "# Other\n"
+        _refused(lambda: mk("src").save(other, t.sha(other), "Guide - clean.md"), "a second, different save")
+        z = mk("src")   # cell 1 run again before cleanup: the run carries on, no second temp Doc
+        z.open()
+        assert z.j.get("temp_doc") == "tmp1" and z.j.get("saved_ok") and fd.copies == 2, (z.j, fd.copies)
         assert mk("src").cleanup() == {"temp_doc": "tmp1", "trashed": True}   # a later cell, from the journal
         assert mk("src").cleanup() == {"temp_doc": "tmp1", "trashed": True} and mk("src").j["temp_trashed"]
         assert trashes() == ["tmp1"] and "trashed" not in fd.files["tmp2"] and "trashed" not in fd.files["src"]
         _refused(lambda: y.cleanup(), "run B trashed before its own save")
-        # a finished run reopened starts fresh; an untrashed temp Doc from it is reported, never trashed
-        fd.files["tmp1"].pop("trashed")
-        z = mk("src")
-        z.j["temp_trashed"] = False
-        z._save_journal()
+        z = mk("src")   # finished and trashed: a real re-run starts a new journal
         z.open()
-        assert z.j.get("left_from_earlier_run") == "tmp1" and "temp_doc" not in z.j, z.j
-        assert "left_from_earlier_run" not in mk("src2").j   # a mid-run journal is not a finished run
-        z.j.update(temp_doc="tmp1", saved_ok=True, temp_trashed=True)   # finished AND trashed: nothing left over
-        z._save_journal()
-        z.open()
-        assert "left_from_earlier_run" not in z.j, z.j
+        assert "temp_doc" not in z.j and "saved" not in z.j and z.j["account"] == "me", z.j
+        assert mk("src2").j["temp_doc"] == "tmp2"   # a mid-run journal is kept
+        # one run, one account: a later cell cannot switch it, and one that names none inherits it
+        _refused(lambda: t.Txn(fd, "other", "src2", journals=d), "account switched mid-run")
+        assert t.Txn(fd, None, "src2", journals=d).account == "me"
 
     for name, fd_kw, save_kw, expect in (
             ("read-back differs", {"corrupt_readback": True}, {}, "does not match"),
@@ -718,6 +716,12 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
         later.export(os.path.join(d, "e.md"))
         _refused(lambda: later.save(text, ok, "Other - clean.md"), "a later cell dropped test mode")
         _refused(lambda: t.Txn(fd, "me", "src2", journals=d, test_folder="x"), "test folder switched mid-run")
+        # the OCR language reaches the copy
+        fd = FakeDrive()
+        x = t.Txn(fd, "me", "src", journals=d + "/o", fetch=fd.urls.__getitem__)
+        x.open()
+        x.export(os.path.join(d, "e.md"), "de")
+        assert fd.files["tmp1"]["ocr"] == "de", fd.files["tmp1"]
         # a trash Drive does not confirm is not reported as done
         fd = FakeDrive(trash_sticks=False)
         x = t.Txn(fd, "me", "src", journals=d + "/t", fetch=fd.urls.__getitem__)

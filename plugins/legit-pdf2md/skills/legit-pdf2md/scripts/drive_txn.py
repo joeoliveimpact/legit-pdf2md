@@ -63,7 +63,10 @@ class Txn:
         self.j = json.load(open(self.path, encoding="utf-8")) if os.path.exists(self.path) else {}
         if test_folder and self.j.get("test_folder") not in (None, test_folder):
             raise DriveError(f"this run is in test mode for folder {self.j['test_folder']}, not {test_folder}")
+        if account and self.j.get("account") not in (None, account):   # one run, one Google account
+            raise DriveError(f"this run uses the account {self.j['account']}, not {account}")
         self.test_folder = test_folder or self.j.get("test_folder")   # a later cell cannot drop test mode
+        self.account = account or self.j.get("account")
 
     def _save_journal(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -79,21 +82,19 @@ class Txn:
         return data
 
     def open(self):
-        """The source's metadata. A finished run starts a new journal; its temp Doc, if cleanup never trashed
-        it, is reported rather than trashed."""
+        """The source's metadata. An unfinished run carries on from its journal (a verified save whose temp Doc
+        is not trashed yet is unfinished: cleanup still has to run). Only a finished run starts a new one."""
         meta = self._run("GOOGLEDRIVE_GET_FILE_METADATA", {"fileId": self.source, "supportsAllDrives": True,
                          "fields": "id,name,mimeType,parents,driveId,modifiedTime"})
-        if self.j.get("saved_ok") or not self.j:
-            left = self.j.get("temp_doc") if not self.j.get("temp_trashed") else None
-            self.j = {**({"left_from_earlier_run": left} if left else {}),
-                      **({"test_folder": self.test_folder} if self.test_folder else {})}
+        if not self.j or self.j.get("saved_ok") and (self.j.get("temp_trashed") or not self.j.get("temp_doc")):
+            self.j = {k: v for k, v in (("test_folder", self.test_folder), ("account", self.account)) if v}
         self.j["source"] = meta
         self._save_journal()
         return meta
 
-    def export(self, path):
+    def export(self, path, ocr_language="en"):
         """Write the source's Markdown export to path. A PDF becomes a temporary Doc first (Google's OCR reads
-        scanned pages), made in the user's private My Drive root and logged before it is used."""
+        scanned pages, in ocr_language), made in the user's private My Drive root and logged before it is used."""
         src = self.j["source"]
         doc = src["id"]
         if src["mimeType"] != DOC:
@@ -103,7 +104,7 @@ class Txn:
                     self.j["possible_orphan"] = f"'{self.j['copy_started']}' in My Drive (a copy whose id was lost)"
                 self.j["copy_started"] = name
                 self._save_journal()
-                data = self._run("GOOGLEDRIVE_COPY_FILE_ADVANCED", {"fileId": doc, "mimeType": DOC, "ocrLanguage": "en",
+                data = self._run("GOOGLEDRIVE_COPY_FILE_ADVANCED", {"fileId": doc, "mimeType": DOC, "ocrLanguage": ocr_language,
                                  "supportsAllDrives": True, "name": name, "parents": ["root"]})
                 if not data.get("id"):
                     raise DriveError(f"the copy returned no id, so the temporary Doc cannot be tracked; look for "
@@ -126,6 +127,10 @@ class Txn:
         temporary Doc alone, if the text is not the checked text or the read-back differs."""
         if sha(text) != clean_sha256:
             raise DriveError("this text is not the text that passed the check (hash differs); not saved")
+        if self.j.get("saved_ok"):   # run again after a verified save (a re-run cell): never a second file
+            if self.j["saved"].get("sha256") != clean_sha256:
+                raise DriveError(f"this run already saved a different text as {self.j['saved']['id']}; not saved again")
+            return self.j["saved"]
         parent = (self.j["source"].get("parents") or [None])[0]
         if self.test_folder and parent != self.test_folder:
             raise DriveError(f"test mode: the source is not in the test folder {self.test_folder}; not saved")
@@ -144,7 +149,7 @@ class Txn:
             where = "My Drive root (Drive shows this account no folder for the source)"
         if not data.get("id"):
             raise DriveError("the save returned no file id; check Drive before running again")
-        self.j.update(saved={"id": data["id"], "name": name, "where": where}, saved_ok=False)
+        self.j.update(saved={"id": data["id"], "name": name, "where": where, "sha256": clean_sha256}, saved_ok=False)
         self._save_journal()
         url = _find(self._run("GOOGLEDRIVE_DOWNLOAD_FILE", {"fileId": data["id"]}), "s3url")
         if not url:

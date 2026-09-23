@@ -16,7 +16,7 @@ Done means all five:
 4. The saved file was read back and its sha256 equals the pipeline's `clean_sha256`, and only then was the temporary Doc (if one was made) trashed.
 5. A short report (Step 6).
 
-**Re-invoked partway through?** (A long session can drop this file from context; reloading it is right.) Do not start over. Continue from the first unfinished step using what already exists: on the connector, the journal `/mnt/files/legit-pdf2md/txn-<file id>.json` and the state file `state-<file id>.json` beside it; on the CLI, the temporary Doc id and the edit batches you kept. Never make a second temporary Doc for a run that already has one.
+**Re-invoked partway through?** (A long session can drop this file from context; reloading it is right.) Do not start over. Continue from the first unfinished step using what already exists: on the connector, the journal `/mnt/files/legit-pdf2md/txn-<file id>.json` and the state file `state-<file id>.json` beside it (the runtime file says how to read them); on the CLI, the temporary Doc id and the edit batches you kept. Running `pipeline` again without `--final` resumes from the state file and prints the current packet. Never make a second temporary Doc for a run that already has one.
 
 ## Why this matters
 
@@ -37,7 +37,7 @@ Look before asking; never make the user describe their setup. (Handed a local `.
 
 1. **Connector (MCP)**: Claude chat, Cowork, Claude Code, ChatGPT. Composio's meta-tools are in the session (`COMPOSIO_MULTI_EXECUTE_TOOL`, `COMPOSIO_REMOTE_WORKBENCH`, `COMPOSIO_MANAGE_CONNECTIONS`). Check Drive: `COMPOSIO_MANAGE_CONNECTIONS` with `{"toolkits": [{"name": "googledrive", "action": "list"}]}` must show an `ACTIVE` account. Then follow **`references/runtime-connector.md`**.
 2. **CLI**: Claude Code or any AI with a shell. `composio whoami` answers with an email (on Windows try `wsl.exe -e bash -lc 'composio whoami'` before concluding it is missing), and `composio connections list` shows `googledrive` with status `ACTIVE`. Then follow **`references/runtime-cli.md`**.
-3. **Neither**: say which two you looked for, then offer: connect it (about five minutes, once: the setup guide that came with this skill), or do the Drive part by hand (upload the PDF, open it with Google Docs, File > Download > Markdown) and take the local route.
+3. **Neither**: say which two you looked for, then offer: connect it (about five minutes, once: the "Connect Google Drive" section of this plugin's README), or do the Drive part by hand (upload the PDF, open it with Google Docs, File > Download > Markdown) and take the local route. The local route needs Python on this machine; Composio needs none, because its workbench brings its own.
 
 `ACTIVE` is the only status that works; `EXPIRED` looks identical in a plain listing. Several accounts on the toolkit is normal: name one on every call (the reference file says how) and confirm it with `GOOGLEDRIVE_GET_ABOUT` before any write. The connector marks one account `is_default`; start there.
 
@@ -47,17 +47,17 @@ Use only Composio for Drive. If the app also has its own Google Drive integratio
 
 - The file ID is the part of the link after `/d/`, or search by name with `GOOGLEDRIVE_FIND_FILE`.
 - Metadata must ask for the fields by name, or `parents` silently goes missing: `{"fileId": "<id>", "fields": "id,name,mimeType,parents,driveId,modifiedTime", "supportsAllDrives": true}`. The parent folder is the only thing that puts the clean file back beside its source.
-- **404 "File not found"**: call `GOOGLEDRIVE_GET_ABOUT` before doubting the ID. The connection is often signed in to a different Google account than the one that owns the file, and Drive answers a wrong account with the same 404 as a wrong ID. Tell the user which account the connection uses.
+- **404 "File not found"**: call `GOOGLEDRIVE_GET_ABOUT` before doubting the ID. The connection is often signed in to a different Google account than the one that owns the file, and Drive answers a wrong account with the same 404 as a wrong ID. With several ACTIVE accounts, try the others; otherwise tell the user which account the connection uses. Once one account finds the file, use only that account for the whole run.
 
 ## Step 2: Export and run the pipeline
 
-A PDF is first copied to a temporary Google Doc in the user's private **My Drive root** (never the shared folder, which may carry a public link): `GOOGLEDRIVE_COPY_FILE_ADVANCED` with `mimeType: application/vnd.google-apps.document` and `ocrLanguage` (`en`, or the document's language). That copy is where Google reads scanned pages. Keep its id. The Doc (or the temporary copy) is exported as `text/markdown`, and the export goes straight into the workbench: its download link expires in an hour, and the raw export (the expensive part) never enters the conversation.
+A PDF is first copied to a temporary Google Doc in the user's private **My Drive root** (never the shared folder, which may carry a public link), with the document's OCR language (`en` unless it is in another language). That copy is where Google reads scanned pages. **On the connector, `drive_txn.py` makes and logs this copy: never make it yourself**, or it is a second copy nobody trashes. On the CLI you make it and keep its id. The Doc (or the temporary copy) is exported as `text/markdown`, and the export goes straight into the workbench: its download link expires in an hour, and the raw export (the expensive part) never enters the conversation.
 
 Then, in the workbench: `clean_gdoc_md.py pipeline export.md --state state.json`. It prints compact JSON:
-- `status: needs_host_edits` with a packet: `rev`, `ops_by_type`, and `issues`, a list of blocks. Each block has an `id` (`b3`), `types`, its `lines`, its `text` with every line numbered (`171| Make a free account.`), and sometimes `suggested_drop` or `suggested_list`. Go to Step 3.
+- `status: needs_host_edits` with a packet: `rev`, `ops_by_type`, and `issues`, a list of blocks. Each block has an `id` (`b3`), `types`, its `lines`, its `text` with every line numbered (`171| Make a free account.`), the lines just `before` and `after` it, and sometimes `suggested_drop` or `suggested_list` (both are lists). Go to Step 3.
 - No issues left: it runs the final check itself. Go to Step 4.
 
-The runtime file has the exact cells. **Local route** (the user handed you an exported `.md`, no Composio): run the same commands with this session's own Python (`python3`; `py -3` on Windows, where `python` is often a Microsoft Store shortcut that prints "Python was not found") and the script in this skill's `scripts/` folder (inside the directory this skill was loaded from). No Python anywhere: say so and stop.
+The runtime file has the exact cells. **Local route** (the user handed you an exported `.md`, no Composio): run the same commands with this session's own Python (`python3`; `py -3` on Windows, where `python` is often a Microsoft Store shortcut that prints "Python was not found") and the script in this skill's `scripts/` folder (inside the directory this skill was loaded from), keeping the state and edits files in a temporary folder. No Python anywhere: say so and stop.
 
 ## Step 3: Write the edits (judgment)
 
@@ -78,13 +78,13 @@ then `clean_gdoc_md.py apply-edits edits.json --state state.json`. It is all or 
 - `delete`: remove whole lines of page furniture, with a `reason`.
 - `number_list`: rebuild a numbered list; only the stand-alone step numbers may move, each to the start of its own item, in order.
 - `move_heading`: a letter-spaced heading that landed inside a sentence moves out whole, onto its own line.
-An edit may cover a block's lines plus the line either side; deletions stay on the block's own lines. Only use ops listed for the block's types in `ops_by_type`.
+An edit may cover a block's lines plus the line either side; deletions (`delete`, `drops`) only work on the lines that were flagged, so a real sentence sitting between two flagged lines cannot be removed. Only use ops listed for the block's types in `ops_by_type`.
 
 **What to do with each type:**
 - `letter_spaced`: display type came out as single letters (`S T A R T W H E R E Y O U A R E`, `W H Y`). Rejoin the words: `Start where you are`. Part and section titles become `##`, sub-labels `###` or bold; the document title gets `#`. Sentence case. A line mixing a spaced title with normal text: title as the heading, text below it. A word glued to spaced type (`MetricoolB O N U S`) splits: `### Metricool` then `Bonus · not in the reel`.
 - `number_list` with `suggested_list`: the script's proposed list, with its own `lines`. **Check it against the text, do not rubber-stamp it.** It can be wrong when the numbers are real content (`final score: 1 / 2 / 3`, `Chapter 3`), when the numbers sit before their items rather than after, or when the run is broken (1, 1, 2). If it is right, send it as a `number_list` edit with its `lines` and `text`. If not, write the right list, or leave the numbers where they are.
 - `detached_number`: a step number pulled out of its list. Rebuild the list, or if you cannot tell which step it belongs to, keep the sentences whole and drop the stray number (`drops` + `reason`) rather than guess. Leave a blank line after a list's last item.
-- `repeated_line`, `page_nav_attached`: page furniture repeated on every page. Remove it (`delete`, or `drops` using the block's `suggested_drop`). Keep a line that repeats because it is real content, and keep the author's name and handle once where they first appear.
+- `repeated_line`, `page_nav_attached`: page furniture repeated on every page. Remove it: a whole `repeated_line` with `delete`; the navigation text stuck to a real line with `replace` + `drops` (the block's `suggested_drop` is the text to drop). Keep a line that repeats because it is real content, and keep the author's name and handle once where they first appear.
 - `code_label`: the export put display labels in code font (`` `CONTENT` ``). Remove the backticks from labels and headings; keep them on real code, commands and file names.
 - `odd_asterisks`: remove one only when it is clearly OCR noise; a wildcard, a multiplication sign, real bold or italics stay.
 
@@ -93,13 +93,13 @@ An edit may cover a block's lines plus the line either side; deletions stay on t
 ## Step 4: The final check
 
 `clean_gdoc_md.py pipeline export.md --state state.json --final -o clean.md` (it writes `clean.md` only when validated). Always validate this way, never with the older standalone `check`: a correctly moved heading can fail that one.
-- `validated`: go to Step 5. `left_for_review` counts blocks you chose to leave; that is allowed.
+- `validated`: go to Step 5. `left_for_review` counts blocks you chose to leave; that is allowed. Read `deleted` (every removal, with its reason): anything there that is real content, put back before saving.
 - `needs_review`: `unexplained_drops` lists text that was removed without a logged reason. Put it back or log it (`drops`/`delete` with a reason), then run the final check again. The file is not saved until this passes.
 - `failed`: read `check`. `added_runs` is text the source never had; `partial_word_drops` cut into a word; `merged_words` joined two words ("now here" became "nowhere"; rejoining letter-spaced type is not a merge, even with OCR chunks like `P A S TE`, so if a rejoined heading is listed, its first or last piece is an ordinary word: keep that word separate); `images` must show `ok: true` (every picture present, in order, none invented). Fix with more edits and check again. `moved_runs` and `split_words` do not fail it; mention moved text in the report.
 
 ## Step 5: Save, verify, clean up
 
-Name: `<original title> - clean.md`, where a PDF's title loses a trailing `.pdf` (any case) and nothing else is ever cut (`Guide.pdf` → `Guide - clean.md`; `Notes 09.11.26` → `Notes 09.11.26 - clean.md`).
+Name: `<original title> - clean.md`, where a PDF's title loses a trailing `.pdf` (any case) and nothing else is ever cut (`Guide.pdf` → `Guide - clean.md`; `Notes 09.11.26` → `Notes 09.11.26 - clean.md`). The script's `clean_name(title, mime_type)` applies this rule; use it rather than typing the name. A local `Guide.md` becomes `Guide - clean.md` beside it.
 
 Save in the source's folder, read the file back, and compare its sha256 with `clean_sha256`. Only when they match, trash the temporary Doc this run made and confirm it reads `trashed: true`. Trash is recoverable for 30 days; never delete permanently, and never trash anything this run did not create. If the account may not add files to the source's folder, the clean file goes to My Drive root and the report says so. If a read-back does not match, stop: keep the temporary Doc and report the saved file's id so the user can check it. The runtime file has the exact calls (on the connector, `drive_txn.py` does all of this).
 
@@ -113,6 +113,7 @@ Keep it short:
 
 ## References
 
+In the `references/` folder next to this file (read from GitHub: replace `SKILL.md` at the end of this file's link with `references/<name>`):
 - `references/runtime-connector.md`: the connector path (Claude chat, Cowork, Code, ChatGPT), cell by cell.
 - `references/runtime-cli.md`: the CLI path, including Windows with the CLI inside WSL.
 - `references/tools-and-limits.md`: every Composio tool with its parameter-casing traps, and the known limits of the script and the check. Open it when a call fails validation or a result is not explained above.
