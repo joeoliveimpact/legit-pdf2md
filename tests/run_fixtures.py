@@ -10,7 +10,7 @@
 Exit 1 if any fixture fails. The fixture list was frozen at v0.1.4 (plan step A1); fixtures for
 features not built yet are listed as pending, with the step that makes them live.
 """
-import argparse, importlib.util, json, os, re, subprocess, sys, tempfile
+import argparse, collections, importlib.util, json, os, re, subprocess, sys, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLUGIN = os.path.join(ROOT, "plugins", "legit-pdf2md")
@@ -18,8 +18,6 @@ SCRIPT = os.path.join(PLUGIN, "skills", "legit-pdf2md", "scripts", "clean_gdoc_m
 DOC, PDF = "application/vnd.google-apps.document", "application/pdf"
 FIXTURES = []
 PENDING = {   # name: (plan step that makes it live, what it will prove)
-    "real_line_next_to_furniture": ("B2", "a real sentence deleted next to page furniture comes out needs_review"),
-    "furniture_word_deleted_elsewhere": ("B2", "a furniture word deleted on another line never reconciles a real deletion"),
     "table_reorder": ("C2", "a correct table rebuild passes; prices moved to the wrong plan are rejected"),
 }
 
@@ -191,6 +189,142 @@ def clean_file_names(m):
     assert m.clean_name("Report.PDF", PDF) == "Report - clean.md"
     assert m.clean_name("Draft.pdf", DOC) == "Draft.pdf - clean.md", "only a PDF loses .pdf"
     assert m.clean_name("export.md", "text/markdown") == "export.md - clean.md"
+
+
+# ---------------------------------------------------------------- B: analyze, autofix, apply-edits, pipeline
+
+NAV = "`You're here: {} • Next: {}` → `• @coachhandle`"
+GUIDE = "\n\n".join([
+    "Coach Name", "@ C O A C H H A N D L E",
+    "P A R T 1 · S T A R T H E R E @ C O A C H H A N D L E",
+    "What we use it for: every call recorded, then turned into tasks.",
+    "Make a free account. It takes a minute. 1", "Connect it to your calendar. 2", "Run your first call.", "3",
+    NAV.format("the map", "step one"),
+    "P A R T 2 · S T E P O N E @ C O A C H H A N D L E",
+    "What we use it for: talking instead of typing all day long.",
+    "**S t e p 1** Write down every app",
+    "`Here is every app I use: [LIST].`", "`For each one, tell me what to connect first.`",
+    "Paste the answer out, then paste it", "somewhere else. It stays simple.",
+    NAV.format("step one", "step two"),
+    "P A R T 3 · T H E T O O L S @ C O A C H H A N D L E",
+    "What we use it for: booking calls without the back and forth.",
+    "A real line that stays in the guide.",
+    NAV.format("step two", "the end"),
+    "The end of the guide.",
+]) + "\n"
+
+
+def run_pipeline(m, export, edits=None, final=False, state=None):
+    with tempfile.TemporaryDirectory() as d:
+        p = state or os.path.join(d, "state.json")
+        r = m.pipeline(export, p, final=False)
+        errors = None
+        if edits is not None:
+            st = m._load_state(p)
+            errors = m._apply(st, edits(st, r), st["issues"])
+            if not errors:
+                m._save_state(p, st)
+        if final:
+            r = m.pipeline(export, p, final=True)
+        return r, errors, m._load_state(p)
+
+
+@fixture
+def analyze_flags_nav_and_handle_not_repeated_openings(m):
+    issues = m.analyze(m.strip(GUIDE)[0])
+    kinds = collections.Counter(x["type"] for x in issues)
+    assert kinds["page_nav"] == 3 and kinds["repeated_handle"] == 3, kinds
+    whatwe = [x for x in issues if "What we use it for" in x["text"]]
+    assert not whatwe, ("a repeated opening alone is not furniture", whatwe)
+
+
+@fixture
+def autofix_passes_check_with_reconciled_ledger(m):
+    r, _, st = run_pipeline(m, GUIDE, final=True)
+    assert r["status"] == "validated", r
+    assert len(st["ledger"]) == 6 and "@ C O A C H H A N D L E" in st["text"].split("\n")[2], st["text"][:200]
+    for gone in ("You're here", "S T A R T H E R E @"):
+        assert gone not in st["text"], gone
+    for made in ("1. Make a free account.", "3. Run your first call.", "**Step 1**", "```\nHere is every app",
+                 "paste it somewhere else."):
+        assert made in st["text"], made
+
+
+@fixture
+def real_line_next_to_furniture(m):
+    """A real sentence deleted beside logged page furniture must not hide inside the furniture's deletion."""
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "s.json")
+        m.pipeline(GUIDE, p)
+        st = m._load_state(p)
+        st["text"] = st["text"].replace("A real line that stays in the guide.\n", "")   # bypasses _edit: unlogged
+        m._save_state(p, st)
+        r = m.pipeline(GUIDE, p, final=True)
+    assert r["status"] == "needs_review" and any("real line" in t for t in r["unexplained_drops"]), r
+
+
+@fixture
+def furniture_word_deleted_elsewhere(m):
+    """Deleting a word that also appears in logged furniture ("here") is still unexplained: position, not text."""
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "s.json")
+        m.pipeline(GUIDE, p)
+        st = m._load_state(p)
+        assert "START HERE" not in st["text"]
+        st["text"] = st["text"].replace("The end of the guide.", "The end of guide.")
+        m._save_state(p, st)
+        r = m.pipeline(GUIDE, p, final=True)
+    assert r["status"] == "needs_review" and r["unexplained_drops"] == ["the"], r
+
+
+def _issue_for(st, needle):
+    L = st["text"].split("\n")
+    ln = next(i + 1 for i, l in enumerate(L) if needle in l)
+    return ln, next(x["id"] for x in st["issues"] if x["lines"][0] <= ln <= x["lines"][1])
+
+
+@fixture
+def apply_edits_valid_heading_then_validated(m):
+    def edits(st, r):
+        ln, i = _issue_for(st, "P A R T 2")
+        return [{"issue": i, "op": "replace", "lines": [ln, ln], "text": "## Part 2 · Step one"}]
+    r, errors, st = run_pipeline(m, GUIDE, edits, final=True)
+    assert errors == [] and r["status"] == "validated" and "## Part 2 · Step one" in st["text"], (errors, r)
+
+
+@fixture
+def apply_edits_rejects_added_word_and_out_of_range(m):
+    def added(st, r):
+        ln, i = _issue_for(st, "P A R T 2")
+        return [{"issue": i, "op": "replace", "lines": [ln, ln], "text": "## Part 2 · Step one, the fun part"}]
+    _, errors, st = run_pipeline(m, GUIDE, added)
+    assert errors and "changes the wording" in errors[0] and "fun part" not in st["text"], errors
+
+    def outside(st, r):
+        _, i = _issue_for(st, "P A R T 2")
+        ln = next(n + 1 for n, l in enumerate(st["text"].split("\n")) if l.startswith("The end"))
+        return [{"issue": i, "op": "replace", "lines": [ln, ln], "text": "The end of the guide."}]
+    _, errors, _ = run_pipeline(m, GUIDE, outside)
+    assert errors and "outside its issues' lines" in errors[0], errors
+
+    def unlogged_delete(st, r):
+        ln, i = _issue_for(st, "P A R T 2")
+        return [{"issue": i, "op": "delete", "lines": [ln, ln]}]
+    _, errors, _ = run_pipeline(m, GUIDE, unlogged_delete)
+    assert errors and "needs a reason" in errors[0], errors
+
+
+@fixture
+def pipeline_resumes_after_a_crash(m):
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "s.json")
+        st = m._new_state(GUIDE)   # the crash came right after strip: state saved, autofix never ran
+        m._save_state(p, st)
+        open(p + ".tmp", "w").write("{half a write")   # and a torn temp file from the crashed write
+        r = m.pipeline(GUIDE, p, final=True)
+        assert r["status"] == "validated" and r["autofixed"] > 0, r
+        again = m.pipeline(GUIDE, p, final=True)
+        assert again["clean_sha256"] == r["clean_sha256"] and again["autofixed"] == r["autofixed"], again
 
 
 # ---------------------------------------------------------------- A2: one version everywhere

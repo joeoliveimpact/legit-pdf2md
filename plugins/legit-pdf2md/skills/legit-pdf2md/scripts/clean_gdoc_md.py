@@ -16,7 +16,7 @@ line, except inside list items, headings, quotes and tables. The worklist names 
 """
 __version__ = "0.1.4"
 
-import argparse, bisect, collections, difflib, html, json, os, re, secrets, subprocess, sys, tempfile, unicodedata
+import argparse, bisect, collections, difflib, hashlib, html, json, os, re, secrets, subprocess, sys, tempfile, unicodedata
 
 DATA_DEF = re.compile(r"^\[image(\d+)\]:[ \t]*<?data:image/[^\s>]*>?[ \t]*$", re.M)   # base64 image definition only
 REF_USE = re.compile(r"!\[[^\]]*\]\[image(\d+)\]")                                   # ![][image1]
@@ -577,6 +577,459 @@ def clean_name(title, mime_type):
     return f"{title} - clean.md"
 
 
+# ---------------------------------------------------------------- pipeline: analyze, autofix, apply-edits
+
+# Every edit, automatic or from the AI, goes through _edit. It follows each letter back to its position in the
+# export (the letter map) and logs every intentional deletion there (the ledger). The final check compares the
+# export with the result; a deletion the ledger cannot explain means needs_review, and the file is not saved.
+HANDLE_OR_URL = re.compile(r"@\w{3,}|\b[\w-]+\.(?:com|ai|io|dev|co|org|net|app)\b|https?://")
+NAV_MARK = re.compile(r"\bNext:|→|•|\|")
+TRAILING_NUMBER = re.compile(r"^(.*[.!?:])\s+(\d{1,2})$")
+MICRO_SPACED = re.compile(r"(?<![^\s*_])([A-Z](?: [a-z]){2,}) (\d{1,2})(?![^\s*_])")   # "S t e p 1", "D a y 2"
+CODE_ONLY = re.compile(r"\s*`([^`]+)`\s*")   # a line that is one single-backtick code span
+HOST_OPS = {"letter_spaced": ["replace", "move_heading", "delete"], "code_label": ["replace"],
+            "odd_asterisks": ["replace"], "repeated_line": ["delete", "replace"],
+            "page_nav_attached": ["replace"], "detached_number": ["number_list", "replace"]}
+
+
+def _sha(text):
+    return hashlib.sha256(text.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+
+
+def _rle(xs):
+    runs = []
+    for x in xs:
+        if runs and runs[-1][0] + runs[-1][1] == x:
+            runs[-1][1] += 1
+        else:
+            runs.append([x, 1])
+    return runs
+
+
+def _unrle(runs):
+    return [s + k for s, n in runs for k in range(n)]
+
+
+def _terminal(line):
+    return bool(re.search(r"[.!?:;\"')\]]$", re.sub(r"[`*_]", "", line).strip()))
+
+
+def _edit(st, a, b, text, op, drops=(), reason=None):
+    """Replace lines a..b (1-based, inclusive) of st["text"] under op's rule, keeping the letter map and ledger
+    true. Returns an error string and changes nothing, or None. Rules (letters = the check's letter stream):
+    replace: letters identical once the exact `drops` substrings are removed (those go to the ledger).
+    number_list: the same, except digits may move. move_heading: one whole line of the new text may be a
+    contiguous piece of the old letters moved there; the rest keeps its order. delete: the lines go, logged."""
+    old = st["text"]
+    lines = old.split("\n")
+    if not 1 <= a <= b <= len(lines):
+        return f"lines {a}-{b} are outside the text (1-{len(lines)})"
+    if drops and not reason or op == "delete" and not reason:
+        return "a deletion needs a reason"
+    c0 = len("\n".join(lines[:a - 1])) + (a > 1)
+    seg = "\n".join(lines[a - 1:b])
+    keep = [True] * len(seg)
+    for d in drops:
+        visible = [i for i, k in enumerate(keep) if k]
+        at = "".join(seg[i] for i in visible).find(d) if d else -1
+        if at < 0:
+            return f"drop text not found on lines {a}-{b}: {d[:60]!r}"
+        for i in visible[at:at + len(d)]:
+            keep[i] = False
+    if op == "delete":   # of the two blank lines around it, one goes too
+        tail = b + 1 if a > 1 and b < len(lines) and not lines[a - 2].strip() and not lines[b].strip() else b
+        keep, new = [False] * len(seg), "\n".join(lines[:a - 1] + lines[tail:])
+        n_end = c0
+    else:
+        new = "\n".join(lines[:a - 1] + [text] + lines[b:])
+        n_end = c0 + len(text)
+    _, ca, pa, _ = _stream(old)
+    _, cb, pb, _ = _stream(new)
+    k0, k1 = bisect.bisect_left(pa, c0), bisect.bisect_left(pa, c0 + len(seg))
+    n0, n1 = bisect.bisect_left(pb, c0), bisect.bisect_left(pb, n_end)
+    if ca[:k0] != cb[:n0] or ca[k1:] != cb[n1:]:
+        return "the edit changed letters outside its lines"
+    lmap = st["lmap"]
+    kept = [k for k in range(k0, k1) if keep[pa[k] - c0]]
+    gone = [k for k in range(k0, k1) if not keep[pa[k] - c0]]
+    before, after = "".join(ca[k] for k in kept), cb[n0:n1]
+    seg_map = [lmap[k] for k in kept]
+    if op in ("replace", "delete"):
+        if after != before:
+            return "the new text changes the wording (letters differ from the source lines)"
+    elif op == "number_list":
+        strip_d = lambda s: re.sub(r"\d", "", s)
+        if strip_d(after) != strip_d(before) or sorted(re.findall(r"\d", after)) != sorted(re.findall(r"\d", before)):
+            return "a number list may only move numbers"
+        digits = collections.defaultdict(collections.deque)
+        letters = collections.deque()
+        for ch, m in zip(before, seg_map):
+            (digits[ch] if ch.isdigit() else letters).append(m)
+        seg_map = [digits[ch].popleft() if ch.isdigit() else letters.popleft() for ch in after]
+    elif op == "move_heading":
+        found = None
+        off = c0
+        for ln in text.split("\n"):
+            j0, j1 = bisect.bisect_left(pb, off) - n0, bisect.bisect_left(pb, off + len(ln)) - n0
+            s = after[j0:j1]
+            off += len(ln) + 1
+            if not s:
+                continue
+            at = before.find(s)
+            while at >= 0 and found is None:
+                if before[:at] + before[at + len(s):] == after[:j0] + after[j1:]:
+                    found = (at, len(s), j0)
+                at = before.find(s, at + 1)
+        if found is None:
+            return "move_heading must move one whole line of the original text, with everything else in order"
+        at, n, j0 = found
+        rest = seg_map[:at] + seg_map[at + n:]
+        seg_map = rest[:j0] + seg_map[at:at + n] + rest[j0:]
+    else:
+        return f"unknown op {op!r}"
+    for x0, n in _rle(sorted(lmap[k] for k in gone)):
+        st["ledger"].append({"letters": [x0, x0 + n], "reason": reason})
+    st["lmap"] = lmap[:k0] + seg_map + lmap[k1:]
+    st["audit"].append({"op": op, "lines": [a, b], "reason": reason, "before": seg[:300],
+                        "after": "" if op == "delete" else text[:300]})
+    st["text"] = new
+    return None
+
+
+def analyze(text, nav_openings=()):
+    """Issues in the text, each with an id, its lines, context, a confidence, whether autofix may apply it
+    (safe_autofix) and the edit ops the AI may use on it. Autofix applies the safe ones; the rest go to the AI.
+    nav_openings: page-navigation openings found earlier, so nav text still attached to a line is found after
+    the stand-alone nav lines are gone."""
+    lines = text.split("\n")
+    kinds = _line_kinds(lines)
+    prose = [i for i, k in enumerate(kinds) if k == "prose" and lines[i].strip()]
+    plain = lambda l: re.sub(r"[`*]", "", l).strip()
+    issues, taken = [], set()
+
+    def ctx(i, step):
+        j = i + step
+        while 0 <= j < len(lines) and not lines[j].strip():
+            j += step
+        return j if 0 <= j < len(lines) else None
+
+    def add(kind, a, b, conf, safe, fix=None, **extra):
+        if any(i in taken for i in range(a, b + 1)):
+            return
+        taken.update(range(a, b + 1))
+        p, n = ctx(a, -1), ctx(b, 1)
+        issues.append({"type": kind, "lines": [a + 1, b + 1], "text": "\n".join(lines[a:b + 1]),
+                       "before": lines[p][:120] if p is not None else "", "after": lines[n][:120] if n is not None else "",
+                       "context_lines": [p + 1 if p is not None else a + 1, n + 1 if n is not None else b + 1],
+                       "confidence": conf, "safe_autofix": safe, "ops": HOST_OPS.get(kind, []), **({"fix": fix} if fix else {}),
+                       **extra})
+
+    # page furniture: a repeated opening AND a handle or web address AND a navigation mark, all on the line
+    openings = collections.defaultdict(list)
+    for i in prose:
+        words = plain(lines[i]).split()
+        if len(words) >= 3 and min(len(w) for w in words[:2]) >= 2:
+            openings[" ".join(words[:2]).lower()].append(i)
+    nav_open = set(nav_openings)
+    for o, idx in openings.items():
+        hits = [i for i in idx if HANDLE_OR_URL.search(plain(lines[i])) and NAV_MARK.search(plain(lines[i]))]
+        if len(idx) >= 3 and len(hits) >= 3:
+            nav_open.add(o)
+            for i in hits:
+                add("page_nav", i, i, 0.95, True, {"op": "delete", "reason": "page navigation repeated on every page"},
+                    opening=o)
+    for i in prose:
+        low = lines[i].lower()
+        for o in nav_open:
+            at = low.find(o)
+            if at > 0 and plain(lines[i]).lower().find(o) > 0:
+                add("page_nav_attached", i, i, 0.8, False, suggested_drop=lines[i][at:])
+    # a handle repeated inside letter-spaced headings; its first appearance stays
+    handles = collections.Counter()
+    for i in prose:
+        for m in re.finditer(r"@((?: ?[^\W_]){3,})", plain(lines[i])):
+            if m.end() == len(plain(lines[i])) or " " not in m.group(1).strip():
+                handles[m.group(1).replace(" ", "").casefold()] += 1
+    first = {}
+    for h in (h for h, c in handles.items() if c >= 3):
+        pat = re.compile("@ ?" + " ?".join(map(re.escape, h)) + r"(?![^\W_])", re.I)
+        for i in prose:
+            m = pat.search(lines[i])
+            if not m:
+                continue
+            if h not in first:
+                first[h] = i
+                continue
+            if SPACED.search(lines[i]):
+                rest = re.sub(r"\s{2,}", " ", lines[i][:m.start()] + lines[i][m.end():]).strip()
+                fix = {"op": "delete", "reason": "handle repeated on every page"} if not rest else \
+                    {"op": "replace", "text": rest, "drops": [m.group(0)], "reason": "handle repeated on every page"}
+                add("repeated_handle", i, i, 0.95, True, fix)
+    # "S t e p 1" and "D a y 2": capital, spaced lower-case letters, a number
+    for i in prose:
+        if MICRO_SPACED.search(lines[i]):
+            new = MICRO_SPACED.sub(lambda m: m.group(1).replace(" ", "") + " " + m.group(2).replace(" ", ""), lines[i])
+            add("spaced_label", i, i, 0.97, True, {"op": "replace", "text": new})
+    # two or more lines that are each one inline code span (prompts, folder trees) become one fenced block
+    code_only = [i for i in prose if CODE_ONLY.fullmatch(lines[i]) and "[image" not in lines[i]]
+    runs = []
+    for i in code_only:
+        if runs and ctx(runs[-1][-1], 1) == i:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    for r in runs:
+        body = [CODE_ONLY.fullmatch(lines[i]).group(1).strip() for i in r]
+        if len(r) >= 2 and any(re.search(r"[a-z]", t) for t in body) and not any("```" in t or "~~~" in t for t in body):
+            add("code_run", r[0], r[-1], 0.95, True, {"op": "replace", "text": "```\n" + "\n".join(body) + "\n```"})
+    # step numbers pulled out of their list: numbers 1..k in order, each standalone or ending its item's line
+    view = lambda i: re.sub(r"[`*_]", "", lines[i]).strip()
+    item_ok = lambda i: not BLOCK_LINE.match(lines[i]) and not SPACED.search(lines[i]) and not lines[i].lstrip().startswith(("*", "`", "#"))
+    marks = []
+    for i in prose:
+        if re.fullmatch(r"\s*\d{1,2}\s*", lines[i]):
+            marks.append((i, int(lines[i]), None))
+        elif TRAILING_NUMBER.match(view(i)) and item_ok(i):
+            m = TRAILING_NUMBER.match(lines[i].strip())
+            if m:
+                marks.append((i, int(m.group(2)), m.group(1)))
+    used = set()
+    for s, (i, v, _) in enumerate(marks):
+        if v != 1 or i in used:
+            continue
+        seq = [marks[s]]
+        for m in marks[s + 1:]:
+            if m[1] == seq[-1][1] + 1 and m[0] - seq[-1][0] <= 8:
+                seq.append(m)
+            elif m[1] == 1:
+                break
+        items, ok, cont = [], True, None
+        start = i if seq[0][2] is not None else ctx(i, -1)
+        if start is None or (seq[0][2] is None and not item_ok(start)):
+            ok = False
+        for n, (li, val, pre) in enumerate(seq):
+            lo = start if n == 0 else (cont if cont is not None else seq[n - 1][0]) + 1
+            body = [j for j in prose if lo <= j < li]
+            if pre is not None:
+                body.append(li)
+            if not body or not all(item_ok(j) for j in body):
+                ok = False
+                break
+            parts = [TRAILING_NUMBER.match(lines[j].strip()).group(1) if j == li else lines[j].strip() for j in body]
+            cont = None
+            nxt = ctx(li, 1)
+            if pre is None and not _terminal(lines[body[-1]]) and nxt is not None and item_ok(nxt) and \
+                    not (n + 1 < len(seq) and nxt >= seq[n + 1][0]):
+                parts.append(lines[nxt].strip())
+                cont = nxt
+            items.append(parts)
+        if not ok:
+            for li, _, _ in seq:
+                add("detached_number", li, li, 0.5, False)
+            continue
+        end = max(seq[-1][0], cont if cont is not None else -1)
+        used.update(m[0] for m in seq)
+        text_ = "\n".join(f"{n + 1}. " + " ".join(p) for n, p in enumerate(items))
+        add("number_list", start, end, 0.9, True, {"op": "number_list", "text": text_})
+    for i, v, _ in marks:
+        if i not in used and i not in taken:
+            add("detached_number", i, i, 0.5, False)
+    # a sentence cut by a page break: no ending punctuation, next paragraph starts in lower case
+    for i, j in zip(prose, prose[1:]):
+        if any(kinds[k] != "prose" for k in range(i, j)) or BLOCK_LINE.match(lines[i]) or BLOCK_LINE.match(lines[j]):
+            continue
+        a_, b_ = view(i), view(j)
+        heading = SPACED.search(lines[i]) or re.fullmatch(r"\s*(\*\*|__).*\1\s*", lines[i])   # a label, not half a sentence
+        if a_ and b_ and re.match(r"[a-z]", b_) and not _terminal(lines[i]) and not heading:
+            add("split_sentence", i, j, 0.99, True, {"op": "replace", "text": lines[i].rstrip() + " " + lines[j].lstrip()})
+    # for the AI: letter-spaced type, code-font labels, odd asterisks, repeated lines
+    caps = lambda l: any(re.search(r"[^\W\d_]", m.group(2)) and not any(ch.islower() for ch in m.group(2))
+                         for m in CODE_SPAN.finditer(l))
+    counts = collections.Counter(lines[i].strip() for i in prose if not PLACEHOLDER.fullmatch(lines[i].strip()))
+    for i in prose:
+        if SPACED.search(lines[i]):
+            add("letter_spaced", i, i, 0.5, False)
+        elif caps(lines[i]):
+            add("code_label", i, i, 0.6, False)
+        elif re.sub(r"^\s*[*] ", "", CODE_SPAN.sub("", lines[i])).count("*") % 2:
+            add("odd_asterisks", i, i, 0.6, False)
+        elif counts[lines[i].strip()] >= 3:
+            add("repeated_line", i, i, 0.6, False)
+    issues.sort(key=lambda x: x["lines"][0])
+    for n, x in enumerate(issues, 1):
+        x["id"] = f"i{n}"
+    return issues
+
+
+def _group(issues, text):
+    """Merge issues on neighbouring lines (at most one blank line apart) into blocks, so the AI sees each stretch
+    once, with the lines just outside it as context. A block allows every op of the issues in it."""
+    lines, blocks = text.split("\n"), []
+    for x in issues:
+        if blocks and x["lines"][0] <= blocks[-1]["lines"][1] + 2:
+            b = blocks[-1]
+            b["lines"][1] = max(b["lines"][1], x["lines"][1])
+            b["types"] = sorted(set(b["types"]) | {x["type"]})
+            b["ops"] = sorted(set(b["ops"]) | set(x["ops"]))
+            b["context_lines"][1] = x["context_lines"][1]
+            b["after"] = x["after"]
+            if "suggested_drop" in x:
+                b.setdefault("suggested_drop", []).append(x["suggested_drop"])
+        else:
+            blocks.append({"types": [x["type"]], "lines": list(x["lines"]), "before": x["before"][:60],
+                           "after": x["after"], "ops": list(x["ops"]), "context_lines": list(x["context_lines"]),
+                           "safe_autofix": False, **({"suggested_drop": [x["suggested_drop"]]} if "suggested_drop" in x else {})})
+    for n, b in enumerate(blocks, 1):
+        b["id"] = f"b{n}"
+        b["after"] = b["after"][:60]
+        b["text"] = "\n".join(l for l in lines[b["lines"][0] - 1:b["lines"][1]] if l.strip())
+    return blocks
+
+
+def _apply(st, edits, issues=None):
+    """Apply a batch of edits bottom-up. With issues, every edit must name issue ids and stay inside their lines
+    (plus the nonblank line either side). All or nothing: returns the list of errors, empty on success."""
+    errors, spans = [], []
+    by_id = {x["id"]: x for x in issues or []}
+    for n, e in enumerate(edits):
+        try:
+            a, b = e["lines"]
+        except (KeyError, TypeError, ValueError):
+            errors.append(f"edit {n}: needs lines [first, last]")
+            continue
+        if issues is not None:
+            ids = e.get("issues") or ([e["issue"]] if e.get("issue") else [])
+            refs = [by_id.get(i) for i in ids]
+            if not ids or None in refs:
+                errors.append(f"edit {n}: unknown or missing issue id {ids}")
+                continue
+            lo = min(min(x["lines"][0], x["context_lines"][0]) for x in refs)
+            hi = max(max(x["lines"][1], x["context_lines"][1]) for x in refs)
+            if a < lo or b > hi:
+                errors.append(f"edit {n}: lines {a}-{b} are outside its issues' lines {lo}-{hi}")
+                continue
+            if not all(e.get("op") in x["ops"] or x["safe_autofix"] for x in refs):
+                errors.append(f"edit {n}: op {e.get('op')!r} is not allowed for {ids}")
+                continue
+        spans.append((a, b, n, e))
+    spans.sort(key=lambda s: -s[0])
+    for (a, b, n, _), (a2, b2, n2, _) in zip(spans, spans[1:]):
+        if b2 >= a:
+            errors.append(f"edits {n2} and {n} overlap")
+    if errors:
+        return errors
+    work = {"text": st["text"], "lmap": list(st["lmap"]), "ledger": list(st["ledger"]), "audit": list(st["audit"])}
+    for a, b, n, e in spans:
+        err = _edit(work, a, b, e.get("text", ""), e.get("op"), e.get("drops") or (), e.get("reason"))
+        if err:
+            errors.append(f"edit {n} (lines {a}-{b}): {err}")
+    if not errors:
+        st.update(work)
+    return errors
+
+
+def autofix(st, passes=3):
+    """Apply every issue analyze marks safe_autofix. Returns how many edits were applied."""
+    done = 0
+    for _ in range(passes):
+        found = analyze(st["text"], st.setdefault("nav_openings", []))
+        st["nav_openings"] = sorted(set(st["nav_openings"]) | {x["opening"] for x in found if x["type"] == "page_nav"})
+        safe = [x for x in found if x["safe_autofix"]]
+        if not safe:
+            break
+        edits = [{**x["fix"], "lines": x["lines"]} for x in safe]
+        errors = _apply(st, edits)
+        if errors:   # one bad fix never blocks the rest: apply them one at a time, bottom-up, skipping failures
+            for e in sorted(edits, key=lambda e: -e["lines"][0]):
+                done += not _apply(st, [e])
+            break
+        done += len(edits)
+    return done
+
+
+def reconcile(st, export):
+    """Check the result against the export with the ledger's deletions cut out of it first, so every deletion
+    the check still reports is one nobody logged (unexplained). Cutting before the diff, not subtracting after
+    it, keeps a moved heading next to a logged deletion from being misread as fragments. Nothing is weakened:
+    each logged deletion must be whole words (else it counts as a partial-word drop), and the image gate runs
+    on the full export, so a logged deletion can never hide a lost picture."""
+    export = export.replace("\r\n", "\n")
+    _, a, apos, ab = _stream(export)
+    ranges, partial = [], []
+    for e in st["ledger"]:
+        x0, x1 = e["letters"]
+        ranges.append((apos[x0], apos[x1 - 1] + 1))
+        if not _whole_word(a, ab, x0, x1):
+            partial.append(_show(a, ab, x0, x1))
+    cut, last = [], 0
+    for c0, c1 in sorted(ranges):
+        cut.append(export[last:max(last, c0)])
+        last = max(last, c1)
+    cut.append(export[last:])
+    r = check("".join(cut), st["text"])
+    r["images"] = image_gate(export, st["text"])
+    r["partial_word_drops"] += partial
+    r["ok"] = not r["added_runs"] and not r["partial_word_drops"] and not r["merged_words"] and r["images"]["ok"]
+    return r, r["drop_spans"]
+
+
+def _new_state(export):
+    text, stats = strip(export)
+    st = {"version": __version__, "source_sha256": _sha(export), "stage": "stripped", "stats": stats, "text": text,
+          "lmap": [], "ledger": [], "audit": [], "issues": []}
+    a, b = _stream(export)[1], _stream(text)[1]
+    if a != b:
+        raise ValueError("strip changed the letters, so deletions cannot be traced; please report this document")
+    st["lmap"] = list(range(len(a)))
+    return st
+
+
+def _save_state(path, st):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        json.dump({**st, "lmap": _rle(st["lmap"])}, f, ensure_ascii=False)
+    os.replace(tmp, path)   # a crash leaves the previous state whole
+
+
+def _load_state(path):
+    with open(path, encoding="utf-8") as f:
+        st = json.load(f)
+    st["lmap"] = _unrle(st["lmap"])
+    return st
+
+
+def pipeline(export, state_path, final=False):
+    """strip -> autofix -> analyze, saving progress after each stage. Returns the status and what the AI needs:
+    needs_host_edits (issues to fix with apply-edits), or with final=True (or no issues left) the check result:
+    validated, needs_review (a deletion the ledger does not explain) or failed (the check failed)."""
+    export = export.replace("\r\n", "\n")
+    st = _load_state(state_path) if os.path.exists(state_path) else None
+    if not st or st.get("source_sha256") != _sha(export) or st.get("version") != __version__:
+        st = _new_state(export)
+        _save_state(state_path, st)
+    if st["stage"] == "stripped":
+        st["autofixed"] = autofix(st)
+        st["stage"] = "autofixed"
+        _save_state(state_path, st)
+    st["issues"] = _group([x for x in analyze(st["text"], st.get("nav_openings", ())) if not x["safe_autofix"]], st["text"])
+    out = {"version": __version__, "source_sha256": st["source_sha256"],
+           "tokens": {"export": len(export) // 4, "now": len(st["text"]) // 4}, "autofixed": st.get("autofixed", 0),
+           "ledger": dict(collections.Counter(e["reason"] for e in st["ledger"]))}
+    if st["issues"] and not final:
+        st["status"] = "needs_host_edits"
+        _save_state(state_path, st)
+        keep = ("id", "types", "lines", "text", "before", "after", "suggested_drop")
+        return {**out, "status": "needs_host_edits", "ops_by_type": {t: HOST_OPS[t] for t in HOST_OPS},
+                "issues": [{k: x[k] for k in keep if k in x} for x in st["issues"]]}
+    r, unexplained = reconcile(st, export)
+    st["status"] = "failed" if not r["ok"] else "needs_review" if unexplained else "validated"
+    st["clean_sha256"] = _sha(st["text"]) if st["status"] == "validated" else None
+    _save_state(state_path, st)
+    keep = ("added_runs", "partial_word_drops", "merged_words", "moved_runs", "split_words", "images")
+    return {**out, "status": st["status"], "clean_sha256": st["clean_sha256"], "left_for_review": len(st["issues"]),
+            "check": {k: r[k] for k in keep}, "unexplained_drops": [d["text"] for d in unexplained]}
+
+
 # ---------------------------------------------------------------- selftest
 
 def selftest():
@@ -751,9 +1204,31 @@ def main():
     p = sub.add_parser("strip"); p.add_argument("input"); p.add_argument("-o", "--output", required=True)
     c = sub.add_parser("check"); c.add_argument("source"); c.add_argument("cleaned")
     sub.add_parser("selftest")
+    z = sub.add_parser("analyze"); z.add_argument("input")
+    q = sub.add_parser("pipeline"); q.add_argument("export"); q.add_argument("--state", required=True)
+    q.add_argument("-o", "--output"); q.add_argument("--final", action="store_true")
+    e = sub.add_parser("apply-edits"); e.add_argument("edits"); e.add_argument("--state", required=True)
     a = ap.parse_args()
     if a.cmd == "selftest":
         return selftest()
+    if a.cmd == "analyze":
+        issues = analyze(open(a.input, encoding="utf-8").read().replace("\r\n", "\n"))
+        return print(json.dumps({"version": __version__, "issues": issues}, ensure_ascii=False, indent=1))
+    if a.cmd == "pipeline":
+        r = pipeline(open(a.export, encoding="utf-8").read(), a.state, a.final)
+        if r["status"] == "validated" and a.output:
+            open(a.output, "w", encoding="utf-8", newline="\n").write(_load_state(a.state)["text"])
+        print(json.dumps(r, ensure_ascii=False, indent=1))
+        sys.exit(1 if r["status"] in ("failed", "needs_review") else 0)
+    if a.cmd == "apply-edits":
+        st = _load_state(a.state)
+        edits = json.load(open(a.edits, encoding="utf-8"))
+        errors = _apply(st, edits.get("edits", edits) if isinstance(edits, dict) else edits, st.get("issues", []))
+        if not errors:
+            st["stage"] = "edited"
+            _save_state(a.state, st)
+        print(json.dumps({"version": __version__, "applied": not errors, "errors": errors}, ensure_ascii=False, indent=1))
+        sys.exit(1 if errors else 0)
     if a.cmd == "strip":
         out, st = strip(open(a.input, encoding="utf-8").read())
         open(a.output, "w", encoding="utf-8", newline="\n").write(out)
