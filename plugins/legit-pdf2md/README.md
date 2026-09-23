@@ -87,7 +87,7 @@ Some things a PDF cannot give back, and it tells you when that happens:
 python3 clean_gdoc_md.py selftest
 ```
 
-On Windows that is usually `python` rather than `python3`.
+On Windows use `py -3` instead of `python3`. `python` there is often a Microsoft Store shortcut that prints "Python was not found" and runs nothing.
 
 ## Licence
 
