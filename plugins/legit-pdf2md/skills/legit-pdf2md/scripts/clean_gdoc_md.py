@@ -589,7 +589,8 @@ MICRO_SPACED = re.compile(r"(?<![^\s*_])([A-Z](?: [a-z]){2,}) (\d{1,2})(?![^\s*_
 CODE_ONLY = re.compile(r"\s*`([^`]+)`\s*")   # a line that is one single-backtick code span
 HOST_OPS = {"letter_spaced": ["replace", "move_heading", "delete"], "code_label": ["replace"],
             "odd_asterisks": ["replace"], "repeated_line": ["delete", "replace"],
-            "page_nav_attached": ["replace"], "detached_number": ["number_list", "replace"]}
+            "page_nav_attached": ["replace"], "detached_number": ["number_list", "replace"],
+            "number_list": ["number_list", "replace"]}
 
 
 def _sha(text):
@@ -883,7 +884,9 @@ def analyze(text, nav_openings=()):
         end = max(seq[-1][0], cont if cont is not None else -1)
         used.update(m[0] for m in seq)
         text_ = "\n".join(f"{n + 1}. " + " ".join(p) for n, p in enumerate(items))
-        add("number_list", start, end, 0.9, True, {"op": "number_list", "text": text_})
+        # the AI confirms it: a real trailing number ("score: 1 / 2 / 3"), numbers placed before their items or a
+        # broken 1, 1, 2 run build a wrong list that keeps every letter, so the check cannot catch it (Joe 09.23.26)
+        add("number_list", start, end, 0.9, False, suggested_list={"lines": [start + 1, end + 1], "text": text_})
     for i, v, _ in marks:
         if i not in used and i not in taken:
             add("detached_number", i, i, 0.5, False)
@@ -928,14 +931,15 @@ def _group(issues, text):
             b["flagged"] += list(range(x["lines"][0], x["lines"][1] + 1))
             b["movable"] += list(range(x["lines"][0], x["lines"][1] + 1)) if "move_heading" in x["ops"] else []
             b["after"] = x["after"]
-            if "suggested_drop" in x:
-                b.setdefault("suggested_drop", []).append(x["suggested_drop"])
+            for k in ("suggested_drop", "suggested_list"):
+                if k in x:
+                    b.setdefault(k, []).append(x[k])
         else:
             blocks.append({"types": [x["type"]], "lines": list(x["lines"]), "before": x["before"][:50],
                            "after": x["after"], "ops": list(x["ops"]), "context_lines": list(x["context_lines"]),
                            "flagged": list(range(x["lines"][0], x["lines"][1] + 1)),
                            "movable": list(range(x["lines"][0], x["lines"][1] + 1)) if "move_heading" in x["ops"] else [],
-                           "safe_autofix": False, **({"suggested_drop": [x["suggested_drop"]]} if "suggested_drop" in x else {})})
+                           "safe_autofix": False, **{k: [x[k]] for k in ("suggested_drop", "suggested_list") if k in x}})
     for n, b in enumerate(blocks, 1):
         b["id"] = f"b{n}"
         b["after"] = b["after"][:50]
@@ -1111,7 +1115,7 @@ def _host_issues(st):
 def _packet(st):
     """What the AI needs to write edits: rev (edits must quote it, so a batch written for an older text is
     refused), the ops per issue type, and the issue blocks."""
-    keep = ("id", "types", "lines", "text", "before", "after", "suggested_drop")
+    keep = ("id", "types", "lines", "text", "before", "after", "suggested_drop", "suggested_list")
     return {"rev": _sha(st["text"])[:12], "ops_by_type": HOST_OPS,
             "issues": [{k: x[k] for k in keep if k in x} for x in st["issues"]]}
 

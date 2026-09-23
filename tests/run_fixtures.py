@@ -245,9 +245,33 @@ def autofix_passes_check_with_reconciled_ledger(m):
     assert len(st["ledger"]) == 6 and "@ C O A C H H A N D L E" in st["text"].split("\n")[2], st["text"][:200]
     for gone in ("You're here", "S T A R T H E R E @"):
         assert gone not in st["text"], gone
-    for made in ("1. Make a free account.", "3. Run your first call.", "**Step 1**", "```\nHere is every app",
-                 "paste it somewhere else."):
+    for made in ("**Step 1**", "```\nHere is every app", "paste it somewhere else."):
         assert made in st["text"], made
+
+
+def _apply_suggested_lists(st, r):
+    """Confirm every suggested list as-is, the way a host AI that agrees with it would."""
+    return [{"issue": x["id"], "op": "number_list", "lines": s["lines"], "text": s["text"]}
+            for x in r["issues"] for s in x.get("suggested_list", ())]
+
+
+@fixture
+def detached_number_lists_go_to_the_ai(m):
+    """Autofix never rebuilds a numbered list (Joe 09.23.26): the AI gets the block with the suggested list and
+    the number_list op, and confirming the suggestion validates. The checker's known-limit shapes stay as they
+    are after autofix, for the AI to judge."""
+    r, _, st = run_pipeline(m, GUIDE)
+    assert r["status"] == "needs_host_edits" and "Make a free account. It takes a minute. 1" in st["text"], r["status"]
+    blk = [x for x in r["issues"] if "suggested_list" in x]
+    assert len(blk) == 1 and "number_list" in r["ops_by_type"]["number_list"], blk
+    assert blk[0]["suggested_list"][0]["text"].startswith("1. Make a free account. It takes a minute.\n2. Connect"), blk
+    r, errors, st = run_pipeline(m, GUIDE, _apply_suggested_lists, final=True)
+    assert errors == [] and r["status"] == "validated" and "3. Run your first call." in st["text"], (errors, r)
+    for exp in ("Intro line.\n\nfinal score: 1\n\nnext game: 2\n\nlast one: 3\n\nEnd.\n",
+                "Intro line.\n\n1\n\nFirst item here.\n\n2\n\nSecond item here.\n\nEnd.\n",
+                "First item here. 1\n\nSecond item here. 1\n\nThird item here. 2\n\nEnd.\n"):
+        r, _, st = run_pipeline(m, exp)
+        assert not re.search(r"^\d+\. ", st["text"], re.M), st["text"]
 
 
 @fixture
@@ -418,8 +442,8 @@ def reconcile_edge_cases(m):
     # number lists move only stand-alone step numbers; digits in the item text stay put
     with tempfile.TemporaryDirectory() as d:
         exp = "Intro line.\n\nTop 10 tips for you. 1\n\nSecond item here. 2\n\nThird item there. 3\n\nEnd line.\n"
-        r = m.pipeline(exp, os.path.join(d, "s.json"), final=True)
-        assert r["status"] == "validated", r
+        r, errors, st = run_pipeline(m, exp, _apply_suggested_lists, final=True, state=os.path.join(d, "s.json"))
+        assert errors == [] and r["status"] == "validated" and "1. Top 10 tips for you." in st["text"], (errors, r)
         st = m._new_state("Buy 7 get 3 free today.\n")
         assert m._apply(st, [{"op": "number_list", "lines": [1, 1], "text": "Buy 3 get 7 free today."}]), "digits swapped"
         st = m._new_state("This is not safe at all.\n")
