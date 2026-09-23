@@ -272,6 +272,9 @@ def detached_number_lists_go_to_the_ai(m):
                 "First item here. 1\n\nSecond item here. 1\n\nThird item here. 2\n\nEnd.\n"):
         r, _, st = run_pipeline(m, exp)
         assert not re.search(r"^\d+\. ", st["text"], re.M), st["text"]
+    # two lists merged into one block keep both suggestions, each with its own lines (checker 09.23.26)
+    r, _, _ = run_pipeline(m, exp)
+    assert [s["lines"] for x in r["issues"] for s in x.get("suggested_list", ())] == [[1, 1], [3, 5]], r["issues"]
 
 
 @fixture
