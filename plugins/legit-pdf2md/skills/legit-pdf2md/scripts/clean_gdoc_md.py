@@ -872,12 +872,14 @@ def _group(issues, text):
             b["types"] = sorted(set(b["types"]) | {x["type"]})
             b["ops"] = sorted(set(b["ops"]) | set(x["ops"]))
             b["context_lines"][1] = x["context_lines"][1]
+            b["flagged"] += list(range(x["lines"][0], x["lines"][1] + 1))
             b["after"] = x["after"]
             if "suggested_drop" in x:
                 b.setdefault("suggested_drop", []).append(x["suggested_drop"])
         else:
             blocks.append({"types": [x["type"]], "lines": list(x["lines"]), "before": x["before"][:50],
                            "after": x["after"], "ops": list(x["ops"]), "context_lines": list(x["context_lines"]),
+                           "flagged": list(range(x["lines"][0], x["lines"][1] + 1)),
                            "safe_autofix": False, **({"suggested_drop": [x["suggested_drop"]]} if "suggested_drop" in x else {})})
     for n, b in enumerate(blocks, 1):
         b["id"] = f"b{n}"
@@ -894,18 +896,20 @@ def _apply(st, edits, issues=None):
     for n, e in enumerate(edits):
         try:
             a, b = e["lines"]
-        except (KeyError, TypeError, ValueError):
-            errors.append(f"edit {n}: needs lines [first, last]")
+            assert isinstance(a, int) and isinstance(b, int) and isinstance(e.get("text", ""), str)
+            assert all(isinstance(d, str) for d in e.get("drops") or ())
+        except (KeyError, TypeError, ValueError, AssertionError, AttributeError):
+            errors.append(f"edit {n}: needs lines [first, last] as numbers, text and drops as strings")
             continue
         if issues is not None:
             ids = e.get("issues") or ([e["issue"]] if e.get("issue") else [])
-            refs = [by_id.get(i) for i in ids]
+            refs = [by_id.get(i) if isinstance(i, str) else None for i in ids] if isinstance(ids, list) else [None]
             if not ids or None in refs:
                 errors.append(f"edit {n}: unknown or missing issue id {ids}")
                 continue
             deletes = e.get("op") == "delete" or e.get("drops")   # deletions stay on flagged lines, never context
-            allowed = {ln for x in refs for ln in range(*(x["lines"] if deletes else x["context_lines"]))} | \
-                {x["lines" if deletes else "context_lines"][1] for x in refs}
+            allowed = {ln for x in refs for ln in (x["flagged"] if deletes else
+                                                     range(x["context_lines"][0], x["context_lines"][1] + 1))}
             outside = [ln for ln in range(a, b + 1) if ln not in allowed and st["text"].split("\n")[ln - 1:ln] != [""]]
             if outside:   # every nonblank line must sit in a named block (or the line either side of it)
                 errors.append(f"edit {n}: lines {a}-{b} are outside its issues' lines (line {outside[0]})")
@@ -968,10 +972,10 @@ def reconcile(st, export):
             end = m.end() if m else p + 1
             while end < len(export) and unicodedata.category(export[end]).startswith("M"):
                 end += 1
-            chars[p:end] = [" "] * (end - p)
+            chars[p:end] = ["\0"] * (end - p)   # NUL: the check skips it, and a line of it is never blank
     r = check("".join(chars), st["text"])
-    r["images"] = image_gate(export, st["text"])
-    r["partial_word_drops"] += partial
+    r["images"] = image_gate(export, st["text"])   # belt and braces: blanking never touches image tokens today,
+    r["partial_word_drops"] += partial              # so this equals the gate on the blanked text, but it cannot drift
     r["ok"] = not r["added_runs"] and not r["partial_word_drops"] and not r["merged_words"] and r["images"]["ok"]
     r["deleted"] = deleted
     return r, r["drop_spans"]
@@ -1015,6 +1019,14 @@ def _host_issues(st):
     return st["issues"]
 
 
+def _packet(st):
+    """What the AI needs to write edits: rev (edits must quote it, so a batch written for an older text is
+    refused), the ops per issue type, and the issue blocks."""
+    keep = ("id", "types", "lines", "text", "before", "after", "suggested_drop")
+    return {"rev": _sha(st["text"])[:12], "ops_by_type": HOST_OPS,
+            "issues": [{k: x[k] for k in keep if k in x} for x in st["issues"]]}
+
+
 def pipeline(export, state_path, final=False):
     """strip -> autofix -> analyze, saving progress after each stage. Returns the status and what the AI needs:
     needs_host_edits (issues to fix with apply-edits), or with final=True (or no issues left) the check result:
@@ -1022,10 +1034,14 @@ def pipeline(export, state_path, final=False):
     export = export.replace("\r\n", "\n")
     try:
         st = _load_state(state_path) if os.path.exists(state_path) else None
-    except (ValueError, KeyError, TypeError):   # a damaged state file: start again from the export
+        assert st is None or all(k in st for k in ("stage", "text", "lmap", "ledger", "audit", "source_sha256"))
+    except (ValueError, KeyError, TypeError, AttributeError, AssertionError):   # damaged: start again from the export
         st = None
     if not st or st.get("source_sha256") != _sha(export) or st.get("version") != __version__:
-        st = _new_state(export)
+        try:
+            st = _new_state(export)
+        except ValueError as err:
+            return {"version": __version__, "status": "failed", "error": str(err)}
         _save_state(state_path, st)
     if st["stage"] == "stripped":
         st["autofixed"] = autofix(st)
@@ -1038,9 +1054,7 @@ def pipeline(export, state_path, final=False):
     if st["issues"] and not final:
         st["status"] = "needs_host_edits"
         _save_state(state_path, st)
-        keep = ("id", "types", "lines", "text", "before", "after", "suggested_drop")
-        return {**out, "status": "needs_host_edits", "ops_by_type": {t: HOST_OPS[t] for t in HOST_OPS},
-                "issues": [{k: x[k] for k in keep if k in x} for x in st["issues"]]}
+        return {**out, "status": "needs_host_edits", **_packet(st)}
     r, unexplained = reconcile(st, export)
     st["status"] = "failed" if not r["ok"] else "needs_review" if unexplained else "validated"
     st["clean_sha256"] = _sha(st["text"]) if st["status"] == "validated" else None
@@ -1242,14 +1256,24 @@ def main():
         print(json.dumps(r, ensure_ascii=False, separators=(",", ":")))   # compact: the AI reads it, tokens count
         sys.exit(1 if r["status"] in ("failed", "needs_review") else 0)
     if a.cmd == "apply-edits":
-        st = _load_state(a.state)
-        edits = json.load(open(a.edits, encoding="utf-8"))
-        errors = _apply(st, edits.get("edits", edits) if isinstance(edits, dict) else edits, _host_issues(st))
+        try:
+            st = _load_state(a.state)
+            edits = json.load(open(a.edits, encoding="utf-8"))
+        except (OSError, ValueError, KeyError, TypeError) as err:
+            print(json.dumps({"version": __version__, "applied": False, "errors": [f"cannot read: {err}"]}))
+            sys.exit(1)
+        rev = _sha(st["text"])[:12]
+        if not isinstance(edits, dict) or edits.get("rev") != rev:
+            errors = [f"stale or missing rev: these edits were written for another version of the text; "
+                      f"use the issues from the newest pipeline or apply-edits output (rev {rev})"]
+        else:
+            errors = _apply(st, edits.get("edits") or [], _host_issues(st))
         if not errors:
             st["stage"] = "edited"
             _host_issues(st)   # the next batch is checked against the new line numbers
             _save_state(a.state, st)
-        print(json.dumps({"version": __version__, "applied": not errors, "errors": errors}, ensure_ascii=False, indent=1))
+        print(json.dumps({"version": __version__, "applied": not errors, "errors": errors, **_packet(st)},
+                         ensure_ascii=False, separators=(",", ":")))
         sys.exit(1 if errors else 0)
     if a.cmd == "strip":
         out, st = strip(open(a.input, encoding="utf-8").read())

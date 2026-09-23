@@ -321,7 +321,7 @@ def edit_scope_and_batch_guards(m):
     is checked against fresh line numbers."""
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, "s.json")
-        m.pipeline(GUIDE, p)
+        r0 = m.pipeline(GUIDE, p)
         st = m._load_state(p)
         L = st["text"].split("\n")
         find = lambda s: next(i + 1 for i, l in enumerate(L) if s in l)
@@ -345,13 +345,53 @@ def edit_scope_and_batch_guards(m):
         cli = lambda f: subprocess.run([sys.executable, m.__file__, "apply-edits", f, "--state", p], env=env,
                                        capture_output=True, text=True, encoding="utf-8", timeout=120)
         first = os.path.join(d, "e1.json")
-        json.dump({"edits": [{"issue": b1, "op": "replace", "lines": [p1, p1], "text": "## Part 1\n\nStart here"}]},
+        json.dump({"rev": r0["rev"], "edits": [{"issue": b1, "op": "replace", "lines": [p1, p1], "text": "## Part 1\n\nStart here"}]},
                   open(first, "w", encoding="utf-8"))
         assert cli(first).returncode == 0
-        stale = os.path.join(d, "e2.json")   # b2's old line numbers now point one line above the heading
-        json.dump({"edits": [{"issue": b2, "op": "delete", "lines": [p2, p2], "reason": "x"}]}, open(stale, "w", encoding="utf-8"))
+        stale = os.path.join(d, "e2.json")   # written from the first packet: refused, whatever its numbers hit now
+        json.dump({"rev": r0["rev"], "edits": [{"issue": b2, "op": "delete", "lines": [p2, p2], "reason": "x"}]},
+                  open(stale, "w", encoding="utf-8"))
         r = cli(stale)
-        assert r.returncode == 1 or "P A R T 2" not in m._load_state(p)["text"], r.stdout
+        assert r.returncode == 1 and "stale" in r.stdout and "P A R T 2" in m._load_state(p)["text"], r.stdout
+    # a real line between two flagged lines of one block is not flagged, so it cannot be deleted
+    exp = "Intro text here.\n\n- W H Y\n- This real sentence matters a lot.\n- H O W\n\nEnd text.\n"
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "s.json")
+        m.pipeline(exp, p)
+        st = m._load_state(p)
+        b = next(x for x in st["issues"] if x["lines"][0] <= 4 <= x["lines"][1])
+        errors = m._apply(st, [{"issue": b["id"], "op": "delete", "lines": [4, 4], "reason": "x"}], st["issues"])
+        assert errors and "real sentence" in st["text"], errors
+
+
+@fixture
+def reconcile_edge_cases(m):
+    """Strip removing an entity's letters inside code font is logged, not a crash; a letter entity there fails
+    cleanly; a damaged state restarts; a logged drop holding a backtick cannot hide a merge; a logged line
+    inside multi-line inline code cannot hide an unlogged deletion after it."""
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "s.json")
+        assert m.pipeline("`W H Y T H I S&amp;nbsp;`\n\nSome text here.\n", p, final=True)["status"] == "validated"
+        r = m.pipeline("`C A F &Eacute;`\n\nSome text here.\n", os.path.join(d, "t.json"), final=True)
+        assert r["status"] == "failed" and "error" in r, r
+        for junk in ("{half", "[]", '{"stage": "stripped"}'):
+            open(p, "w", encoding="utf-8").write(junk)
+            assert m.pipeline(GUIDE, p, final=True)["status"] == "validated", junk
+    exp = "`KEEP` x `big**word** here` end of line.\n"
+    st = m._new_state(exp)
+    line = st["text"].split("\n")[0]
+    assert not m._apply(st, [{"op": "replace", "lines": [1, 1], "reason": "x", "drops": ["KEEP` x "],
+                              "text": "`" + line.replace("`KEEP` x ", "").replace("big**word**", "bigword")}])
+    assert not m.reconcile(st, exp)[0]["ok"], "the merge is still seen"
+    exp = ("Intro text.\n\nSay `alpha\nCONFIDENTIAL DRAFT\nBeta` then ok `code with ![Revenue doubled][image1] "
+           "inside` end.\n\nOutro text.\n\n[image1]: <data:image/png;base64,AAAA>\n")
+    st = m._new_state(exp)
+    L = st["text"].split("\n")
+    n = L.index("CONFIDENTIAL DRAFT") + 1
+    assert not m._apply(st, [{"op": "delete", "lines": [n, n], "reason": "x"}])
+    st["text"] = st["text"].replace(" ![Revenue doubled][image1]", "")   # an unlogged deletion
+    r, unexplained = m.reconcile(st, exp)
+    assert not r["ok"] or unexplained, (r["ok"], unexplained)
 
 
 @fixture
