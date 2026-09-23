@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.4 - 2026-09-22
+
+**No picture goes missing without the check saying so.** Found by running 0.1.3 in ChatGPT on a real 12-page guide: 5 of its 9 pictures vanished from the clean file and the wording check still passed.
+
+- **Pictures inside code formatting are kept.** Google's export sometimes wraps pictures in code formatting (`` `![][image6]![][image7]` ``). The cleaner used to leave those alone and delete the picture data, so the pictures disappeared. Code formatting that holds nothing but pictures now becomes placeholders. On the same guide: 9 of 9 pictures kept, where 0.1.3 kept 4.
+- **Each `[image N]` gets its own line**, so two pictures side by side are two placeholders, not one line. In list items, headings, quotes and tables they stay where they were. The line break is a single one, so the page renders the same, and an indented line keeps its indent.
+- **The check now counts pictures.** It reads them straight from the export, separately from the cleaner, and fails (`images.ok: false`, exit 1) if one is missing, invented or out of order. A picture the export put inside code next to text is listed under `kept_in_code` for the report.
+- **Every deletion the check reports comes with its position** (`drop_spans`): the letter range and the character range in the export (line breaks counted as one), with the deleted words in full.
+- **`.pdf` is removed from a PDF's name only.** The clean file of `Guide.pdf` is `Guide - clean.md` (a 0.1.3 run in ChatGPT saved `Guide.pdf - clean.md`), and a dated title like `Notes 09.11.26` keeps every part.
+- **The script has a version.** `clean_gdoc_md.py --version` prints it, and every JSON result carries it.
+- **Tests run on every change.** A fixture suite (`tests/run_fixtures.py`, standard library only) and the selftest run on GitHub for every pull request, including a check that the version matches in all 7 places it is written.
+
 ## 0.1.3 - 2026-09-22
 
 **The cleanup now always runs in Composio.** Every path (Claude chat, Cowork, Claude Code, ChatGPT; the MCP connector or the CLI) runs the script in Composio's remote workbench. Nothing runs on your computer, so no Python and no coding setup are needed anywhere, and the Windows "Python was not found" problem is gone.
