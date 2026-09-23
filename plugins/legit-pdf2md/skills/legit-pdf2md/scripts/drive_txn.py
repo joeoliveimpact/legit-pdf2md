@@ -61,12 +61,16 @@ class Txn:
         self.call, self.account, self.source, self.fetch = call, account, source, fetch
         self.path = os.path.join(journals, "txn-" + re.sub(r"[^\w-]", "_", source) + ".json")
         self.j = json.load(open(self.path, encoding="utf-8")) if os.path.exists(self.path) else {}
-        if test_folder and self.j.get("test_folder") not in (None, test_folder):
-            raise DriveError(f"this run is in test mode for folder {self.j['test_folder']}, not {test_folder}")
-        if account and self.j.get("account") not in (None, account):   # one run, one Google account
-            raise DriveError(f"this run uses the account {self.j['account']}, not {account}")
-        self.test_folder = test_folder or self.j.get("test_folder")   # a later cell cannot drop test mode
-        self.account = account or self.j.get("account")
+        live = {} if self._finished() else self.j   # a finished run pins nothing on the next one
+        if test_folder and live.get("test_folder") not in (None, test_folder):
+            raise DriveError(f"this run is in test mode for folder {live['test_folder']}, not {test_folder}")
+        if account and live.get("account") not in (None, account):   # one run, one Google account
+            raise DriveError(f"this run uses the account {live['account']}, not {account}")
+        self.test_folder = test_folder or live.get("test_folder")   # a later cell cannot drop test mode
+        self.account = account or live.get("account")
+
+    def _finished(self):
+        return bool(self.j.get("saved_ok") and (self.j.get("temp_trashed") or not self.j.get("temp_doc")))
 
     def _save_journal(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -86,7 +90,7 @@ class Txn:
         is not trashed yet is unfinished: cleanup still has to run). Only a finished run starts a new one."""
         meta = self._run("GOOGLEDRIVE_GET_FILE_METADATA", {"fileId": self.source, "supportsAllDrives": True,
                          "fields": "id,name,mimeType,parents,driveId,modifiedTime"})
-        if not self.j or self.j.get("saved_ok") and (self.j.get("temp_trashed") or not self.j.get("temp_doc")):
+        if not self.j or self._finished():
             self.j = {k: v for k, v in (("test_folder", self.test_folder), ("account", self.account)) if v}
         self.j["source"] = meta
         self._save_journal()

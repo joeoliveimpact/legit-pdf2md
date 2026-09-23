@@ -673,9 +673,15 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
         assert mk("src").cleanup() == {"temp_doc": "tmp1", "trashed": True} and mk("src").j["temp_trashed"]
         assert trashes() == ["tmp1"] and "trashed" not in fd.files["tmp2"] and "trashed" not in fd.files["src"]
         _refused(lambda: y.cleanup(), "run B trashed before its own save")
-        z = mk("src")   # finished and trashed: a real re-run starts a new journal
+        assert t.Txn(fd, None, "src", journals=d).save(text, ok, "x")["id"] == "out1"   # finished: still answers
+        z = t.Txn(fd, "other", "src", journals=d, fetch=fd.urls.__getitem__)   # finished: pins no account on the next run
         z.open()
-        assert "temp_doc" not in z.j and "saved" not in z.j and z.j["account"] == "me", z.j
+        assert "temp_doc" not in z.j and "saved" not in z.j and z.j["account"] == "other", z.j
+        # nor test mode: a finished test-mode run leaves the next run free
+        w = t.Txn(fd, "me", "doc", journals=d, test_folder="fold", fetch=fd.urls.__getitem__)
+        w.open()
+        w.save(text, ok, "Notes - clean.md")
+        assert t.Txn(fd, None, "doc", journals=d).test_folder is None
         assert mk("src2").j["temp_doc"] == "tmp2"   # a mid-run journal is kept
         # one run, one account: a later cell cannot switch it, and one that names none inherits it
         _refused(lambda: t.Txn(fd, "other", "src2", journals=d), "account switched mid-run")
