@@ -643,13 +643,15 @@ def _edit(st, a, b, text, op, drops=(), reason=None):
     else:
         new = "\n".join(lines[:a - 1] + [text] + lines[b:])
         n_end = c0 + len(text)
-    _, ca, pa, _ = _stream(old)
+    _, ca, pa, ba = _stream(old)
     _, cb, pb, _ = _stream(new)
     k0, k1 = bisect.bisect_left(pa, c0), bisect.bisect_left(pa, c0 + len(seg))
     n0, n1 = bisect.bisect_left(pb, c0), bisect.bisect_left(pb, n_end)
     if ca[:k0] != cb[:n0] or ca[k1:] != cb[n1:]:
         return "the edit changed letters outside its lines"
     lmap = st["lmap"]
+    if len(lmap) != len(ca):
+        return "the state's letter map does not match its text; run pipeline on a fresh state"
     kept = [k for k in range(k0, k1) if keep[pa[k] - c0]]
     gone = [k for k in range(k0, k1) if not keep[pa[k] - c0]]
     before, after = "".join(ca[k] for k in kept), cb[n0:n1]
@@ -658,15 +660,51 @@ def _edit(st, a, b, text, op, drops=(), reason=None):
         if after != before:
             return "the new text changes the wording (letters differ from the source lines)"
     elif op == "number_list":
-        strip_d = lambda s: re.sub(r"\d", "", s)
-        if strip_d(after) != strip_d(before) or sorted(re.findall(r"\d", after)) != sorted(re.findall(r"\d", before)):
-            return "a number list may only move numbers"
-        digits = collections.defaultdict(collections.deque)
-        letters = collections.deque()
-        for ch, m in zip(before, seg_map):
-            (digits[ch] if ch.isdigit() else letters).append(m)
-        seg_map = [digits[ch].popleft() if ch.isdigit() else letters.popleft() for ch in after]
+        # Only the list numbers at the start of the new lines may move, and each one must be a stand-alone number
+        # of the original lines ("... account. 1", or "3" on its own line). Every other letter and digit, like
+        # the 10 in "Top 10 tips", keeps its order.
+        wid, w = [], -1
+        for k in range(k0, k1):
+            w += k == k0 or ba[k] is not None
+            wid.append(w)
+        words = collections.defaultdict(list)
+        for k in range(k0, k1):
+            words[wid[k - k0]].append(k)
+        cand = [ks for _, ks in sorted(words.items()) if all(ca[k].isdigit() and keep[pa[k] - c0] for k in ks)]
+        marks, off = [], c0
+        for ln in text.split("\n"):
+            m = re.match(r"\s*(\d+)[.)]\s", ln)
+            if m:
+                marks.append((m.group(1), [j for j in range(n0, n1) if off + m.start(1) <= pb[j] < off + m.end(1)]))
+            off += len(ln) + 1
+        mapped = None
+        for order in (cand, cand[::-1]):   # the number that belongs to the item is usually the first match or the last
+            used, picks = set(), []
+            for v, js in marks:
+                ks = next((ks for ks in order if id(ks) not in used and "".join(ca[k] for k in ks) == v), None)
+                if ks is None or len(ks) != len(js):
+                    break
+                used.add(id(ks))
+                picks.append((js, ks))
+            if len(picks) != len(marks):
+                continue
+            taken_old = {k for _, ks in picks for k in ks}
+            taken_new = {j for js, _ in picks for j in js}
+            rest_old = [k for k in kept if k not in taken_old]
+            rest_new = [j for j in range(n0, n1) if j not in taken_new]
+            if "".join(ca[k] for k in rest_old) == "".join(cb[j] for j in rest_new):
+                m_of = {j: lmap[k] for js, ks in picks for j, k in zip(js, ks)}
+                it = iter(lmap[k] for k in rest_old)
+                mapped = [m_of[j] if j in m_of else next(it) for j in range(n0, n1)]
+                break
+        if mapped is None:
+            return "a number list may only move stand-alone step numbers to the start of its lines"
+        seg_map = mapped
     elif op == "move_heading":
+        # the moved piece must be whole original lines (a heading or label), never words lifted out of a sentence
+        line_of = [seg.count("\n", 0, pa[k] - c0) for k in kept]
+        starts = {i for i in range(len(kept)) if i == 0 or line_of[i] != line_of[i - 1]}
+        ends = {i + 1 for i in range(len(kept)) if i + 1 == len(kept) or line_of[i + 1] != line_of[i]}
         found = None
         off = c0
         for ln in text.split("\n"):
@@ -677,7 +715,8 @@ def _edit(st, a, b, text, op, drops=(), reason=None):
                 continue
             at = before.find(s)
             while at >= 0 and found is None:
-                if before[:at] + before[at + len(s):] == after[:j0] + after[j1:]:
+                if at in starts and at + len(s) in ends and \
+                        before[:at] + before[at + len(s):] == after[:j0] + after[j1:]:
                     found = (at, len(s), j0)
                 at = before.find(s, at + 1)
         if found is None:
@@ -988,7 +1027,8 @@ def reconcile(st, export):
     # here, because nothing is re-read. Runs only while the map matches the text (every edit keeps it so).
     _, b, _, bb = _stream(st["text"])
     lm = st["lmap"]
-    if len(lm) == len(b) and all(0 <= x < len(a) and a[x] == c for x, c in zip(lm, b)):
+    r["letter_map_in_sync"] = len(lm) == len(b) and all(0 <= x < len(a) and a[x] == c for x, c in zip(lm, b))
+    if r["letter_map_in_sync"]:   # out of sync never happens through _edit; if it does, the result cannot validate
         for j in range(1, len(b)):
             e1, e2 = lm[j - 1], lm[j]
             if bb[j] is None and e2 != e1 and (e2 < e1 or any(_resolve(ab[k], bb, j) == "hard" for k in range(e1 + 1, e2 + 1))):
@@ -1067,6 +1107,10 @@ def pipeline(export, state_path, final=False):
     try:
         st = _load_state(state_path) if os.path.exists(state_path) else None
         assert st is None or _valid_state(st)
+        if st:   # every logged range and mapped letter must point inside this export's letters
+            n = len(_stream(export)[1])
+            assert all(0 <= e["letters"][0] < e["letters"][1] <= n for e in st["ledger"])
+            assert all(0 <= x < n for x in st["lmap"])
     except (ValueError, KeyError, TypeError, AttributeError, AssertionError):   # damaged: start again from the export
         st = None
     if not st or st.get("source_sha256") != _sha(export) or st.get("version") != __version__:
@@ -1088,7 +1132,7 @@ def pipeline(export, state_path, final=False):
         _save_state(state_path, st)
         return {**out, "status": "needs_host_edits", **_packet(st)}
     r, unexplained = reconcile(st, export)
-    st["status"] = "failed" if not r["ok"] else "needs_review" if unexplained else "validated"
+    st["status"] = "failed" if not r["ok"] else "needs_review" if unexplained or not r["letter_map_in_sync"] else "validated"
     st["clean_sha256"] = _sha(st["text"]) if st["status"] == "validated" else None
     _save_state(state_path, st)
     keep = ("added_runs", "partial_word_drops", "merged_words", "moved_runs", "split_words", "images")

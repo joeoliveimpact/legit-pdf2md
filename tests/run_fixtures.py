@@ -415,6 +415,23 @@ def reconcile_edge_cases(m):
         st = m._new_state(exp)
         assert not m._apply(st, [{"op": "replace", "lines": [1, 1], "drops": [drop], "reason": "x", "text": text}])
         assert not m.reconcile(st, exp)[0]["ok"], text
+    # number lists move only stand-alone step numbers; digits in the item text stay put
+    with tempfile.TemporaryDirectory() as d:
+        exp = "Intro line.\n\nTop 10 tips for you. 1\n\nSecond item here. 2\n\nThird item there. 3\n\nEnd line.\n"
+        r = m.pipeline(exp, os.path.join(d, "s.json"), final=True)
+        assert r["status"] == "validated", r
+        st = m._new_state("Buy 7 get 3 free today.\n")
+        assert m._apply(st, [{"op": "number_list", "lines": [1, 1], "text": "Buy 3 get 7 free today."}]), "digits swapped"
+        st = m._new_state("This is not safe at all.\n")
+        assert m._apply(st, [{"op": "move_heading", "lines": [1, 1], "text": "This is safe at all.\n\nnot"}]), "word lifted"
+        # a letter map that no longer matches its text: never validated, never a traceback
+        p = os.path.join(d, "t.json")
+        m.pipeline(GUIDE, p)
+        st = m._load_state(p)
+        m._save_state(p, {**st, "lmap": st["lmap"][:-5]})
+        assert m.pipeline(GUIDE, p, final=True)["status"] != "validated"
+        st = m._load_state(p)
+        assert m._apply(st, [{"op": "replace", "lines": [1, 1], "text": st["text"].split("\n")[0]}])
     # a logged letter cut from inside a word fails, even when a lookalike standalone letter sits next to it
     exp = "W H Y Books s tips\n"
     st = m._new_state(exp)
