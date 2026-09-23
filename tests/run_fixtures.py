@@ -315,6 +315,63 @@ def apply_edits_rejects_added_word_and_out_of_range(m):
 
 
 @fixture
+def edit_scope_and_batch_guards(m):
+    """Deletions stay on flagged lines; an edit naming two blocks cannot take the real text between them;
+    overlapping edits and a batch with one bad edit change nothing; a second apply-edits run through the CLI
+    is checked against fresh line numbers."""
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "s.json")
+        m.pipeline(GUIDE, p)
+        st = m._load_state(p)
+        L = st["text"].split("\n")
+        find = lambda s: next(i + 1 for i, l in enumerate(L) if s in l)
+        blk = lambda ln: next(x for x in st["issues"] if x["lines"][0] <= ln <= x["lines"][1])
+        p1, p2 = find("P A R T 1"), find("P A R T 2")
+        b1, b2 = blk(p1)["id"], blk(p2)["id"]
+        real = find("What we use it for: every call")
+        before = json.dumps(st, sort_keys=True)
+        tries = {
+            "span": [{"issues": [b1, b2], "op": "delete", "lines": [p1, p2], "reason": "x"}],
+            "context delete": [{"issue": b1, "op": "delete", "lines": [real, real], "reason": "x"}],
+            "overlap": [{"issue": b1, "op": "replace", "lines": [p1, p1], "text": L[p1 - 1]},
+                        {"issue": b1, "op": "delete", "lines": [p1, p1], "reason": "x"}],
+            "one bad": [{"issue": b1, "op": "replace", "lines": [p1, p1], "text": "## Part 1 · Start here"},
+                        {"issue": b2, "op": "replace", "lines": [p2, p2], "text": "## Part 2 · Step one more"}],
+        }
+        for name, edits in tries.items():
+            errors = m._apply(st, edits, st["issues"])
+            assert errors and json.dumps(st, sort_keys=True) == before, (name, errors)
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        cli = lambda f: subprocess.run([sys.executable, m.__file__, "apply-edits", f, "--state", p], env=env,
+                                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+        first = os.path.join(d, "e1.json")
+        json.dump({"edits": [{"issue": b1, "op": "replace", "lines": [p1, p1], "text": "## Part 1\n\nStart here"}]},
+                  open(first, "w", encoding="utf-8"))
+        assert cli(first).returncode == 0
+        stale = os.path.join(d, "e2.json")   # b2's old line numbers now point one line above the heading
+        json.dump({"edits": [{"issue": b2, "op": "delete", "lines": [p2, p2], "reason": "x"}]}, open(stale, "w", encoding="utf-8"))
+        r = cli(stale)
+        assert r.returncode == 1 or "P A R T 2" not in m._load_state(p)["text"], r.stdout
+
+
+@fixture
+def ledger_guards(m):
+    """A logged deletion that cuts into a word fails; a logged deletion that takes a picture with it fails."""
+    exp = "The troubleshooting guide.\n"
+    st = m._new_state(exp)
+    assert not m._apply(st, [{"op": "replace", "lines": [1, 1], "text": "The shooting guide.", "drops": ["trouble"], "reason": "x"}])
+    r, _ = m.reconcile(st, exp)
+    assert not r["ok"] and r["partial_word_drops"], r
+    exp = "Intro text.\n\n![][image1]Caption here.\n\n[image1]: <data:image/png;base64,AAAA>\n"
+    st = m._new_state(exp)
+    L = st["text"].split("\n")
+    a = L.index("[image 1]") + 1
+    assert not m._apply(st, [{"op": "delete", "lines": [a, a + 1], "reason": "x"}])
+    r, _ = m.reconcile(st, exp)
+    assert not r["ok"] and r["images"]["missing"] == ["1"], r["images"]
+
+
+@fixture
 def pipeline_resumes_after_a_crash(m):
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, "s.json")

@@ -876,12 +876,12 @@ def _group(issues, text):
             if "suggested_drop" in x:
                 b.setdefault("suggested_drop", []).append(x["suggested_drop"])
         else:
-            blocks.append({"types": [x["type"]], "lines": list(x["lines"]), "before": x["before"][:60],
+            blocks.append({"types": [x["type"]], "lines": list(x["lines"]), "before": x["before"][:50],
                            "after": x["after"], "ops": list(x["ops"]), "context_lines": list(x["context_lines"]),
                            "safe_autofix": False, **({"suggested_drop": [x["suggested_drop"]]} if "suggested_drop" in x else {})})
     for n, b in enumerate(blocks, 1):
         b["id"] = f"b{n}"
-        b["after"] = b["after"][:60]
+        b["after"] = b["after"][:50]
         b["text"] = "\n".join(l for l in lines[b["lines"][0] - 1:b["lines"][1]] if l.strip())
     return blocks
 
@@ -903,10 +903,12 @@ def _apply(st, edits, issues=None):
             if not ids or None in refs:
                 errors.append(f"edit {n}: unknown or missing issue id {ids}")
                 continue
-            lo = min(min(x["lines"][0], x["context_lines"][0]) for x in refs)
-            hi = max(max(x["lines"][1], x["context_lines"][1]) for x in refs)
-            if a < lo or b > hi:
-                errors.append(f"edit {n}: lines {a}-{b} are outside its issues' lines {lo}-{hi}")
+            deletes = e.get("op") == "delete" or e.get("drops")   # deletions stay on flagged lines, never context
+            allowed = {ln for x in refs for ln in range(*(x["lines"] if deletes else x["context_lines"]))} | \
+                {x["lines" if deletes else "context_lines"][1] for x in refs}
+            outside = [ln for ln in range(a, b + 1) if ln not in allowed and st["text"].split("\n")[ln - 1:ln] != [""]]
+            if outside:   # every nonblank line must sit in a named block (or the line either side of it)
+                errors.append(f"edit {n}: lines {a}-{b} are outside its issues' lines (line {outside[0]})")
                 continue
             if not all(e.get("op") in x["ops"] or x["safe_autofix"] for x in refs):
                 errors.append(f"edit {n}: op {e.get('op')!r} is not allowed for {ids}")
@@ -955,21 +957,23 @@ def reconcile(st, export):
     on the full export, so a logged deletion can never hide a lost picture."""
     export = export.replace("\r\n", "\n")
     _, a, apos, ab = _stream(export)
-    ranges, partial = [], []
+    chars, partial, deleted = list(export), [], []
     for e in st["ledger"]:
         x0, x1 = e["letters"]
-        ranges.append((apos[x0], apos[x1 - 1] + 1))
+        deleted.append({"reason": e["reason"], "text": _show(a, ab, x0, x1)})
         if not _whole_word(a, ab, x0, x1):
-            partial.append(_show(a, ab, x0, x1))
-    cut, last = [], 0
-    for c0, c1 in sorted(ranges):
-        cut.append(export[last:max(last, c0)])
-        last = max(last, c1)
-    cut.append(export[last:])
-    r = check("".join(cut), st["text"])
+            partial.append(deleted[-1]["text"])
+        for p in sorted({apos[k] for k in range(x0, x1)}):   # blank the letters only: backticks and other
+            m = ENTITY.match(export, p) if export[p] == "&" else None   # Markdown stay, so no code span shifts
+            end = m.end() if m else p + 1
+            while end < len(export) and unicodedata.category(export[end]).startswith("M"):
+                end += 1
+            chars[p:end] = [" "] * (end - p)
+    r = check("".join(chars), st["text"])
     r["images"] = image_gate(export, st["text"])
     r["partial_word_drops"] += partial
     r["ok"] = not r["added_runs"] and not r["partial_word_drops"] and not r["merged_words"] and r["images"]["ok"]
+    r["deleted"] = deleted
     return r, r["drop_spans"]
 
 
@@ -978,9 +982,16 @@ def _new_state(export):
     st = {"version": __version__, "source_sha256": _sha(export), "stage": "stripped", "stats": stats, "text": text,
           "lmap": [], "ledger": [], "audit": [], "issues": []}
     a, b = _stream(export)[1], _stream(text)[1]
-    if a != b:
-        raise ValueError("strip changed the letters, so deletions cannot be traced; please report this document")
     st["lmap"] = list(range(len(a)))
+    if a != b:   # strip dropped letters it may drop (an entity inside code font it unwrapped): trace and log them
+        lmap = [None] * len(b)
+        for i, j, n in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
+            lmap[j:j + n] = range(i, i + n)
+        if None in lmap:
+            raise ValueError("strip added letters, which it never should; please report this document")
+        for x0, n in _rle(sorted(set(range(len(a))) - set(lmap))):
+            st["ledger"].append({"letters": [x0, x0 + n], "reason": "removed by strip (entity in code font)"})
+        st["lmap"] = lmap
     return st
 
 
@@ -998,12 +1009,21 @@ def _load_state(path):
     return st
 
 
+def _host_issues(st):
+    """The AI's issues for the current text, always recomputed, so line numbers never go stale."""
+    st["issues"] = _group([x for x in analyze(st["text"], st.get("nav_openings", ())) if not x["safe_autofix"]], st["text"])
+    return st["issues"]
+
+
 def pipeline(export, state_path, final=False):
     """strip -> autofix -> analyze, saving progress after each stage. Returns the status and what the AI needs:
     needs_host_edits (issues to fix with apply-edits), or with final=True (or no issues left) the check result:
     validated, needs_review (a deletion the ledger does not explain) or failed (the check failed)."""
     export = export.replace("\r\n", "\n")
-    st = _load_state(state_path) if os.path.exists(state_path) else None
+    try:
+        st = _load_state(state_path) if os.path.exists(state_path) else None
+    except (ValueError, KeyError, TypeError):   # a damaged state file: start again from the export
+        st = None
     if not st or st.get("source_sha256") != _sha(export) or st.get("version") != __version__:
         st = _new_state(export)
         _save_state(state_path, st)
@@ -1011,7 +1031,7 @@ def pipeline(export, state_path, final=False):
         st["autofixed"] = autofix(st)
         st["stage"] = "autofixed"
         _save_state(state_path, st)
-    st["issues"] = _group([x for x in analyze(st["text"], st.get("nav_openings", ())) if not x["safe_autofix"]], st["text"])
+    _host_issues(st)
     out = {"version": __version__, "source_sha256": st["source_sha256"],
            "tokens": {"export": len(export) // 4, "now": len(st["text"]) // 4}, "autofixed": st.get("autofixed", 0),
            "ledger": dict(collections.Counter(e["reason"] for e in st["ledger"]))}
@@ -1027,7 +1047,8 @@ def pipeline(export, state_path, final=False):
     _save_state(state_path, st)
     keep = ("added_runs", "partial_word_drops", "merged_words", "moved_runs", "split_words", "images")
     return {**out, "status": st["status"], "clean_sha256": st["clean_sha256"], "left_for_review": len(st["issues"]),
-            "check": {k: r[k] for k in keep}, "unexplained_drops": [d["text"] for d in unexplained]}
+            "check": {k: r[k] for k in keep}, "unexplained_drops": [d["text"] for d in unexplained],
+            "deleted": r["deleted"]}
 
 
 # ---------------------------------------------------------------- selftest
@@ -1218,14 +1239,15 @@ def main():
         r = pipeline(open(a.export, encoding="utf-8").read(), a.state, a.final)
         if r["status"] == "validated" and a.output:
             open(a.output, "w", encoding="utf-8", newline="\n").write(_load_state(a.state)["text"])
-        print(json.dumps(r, ensure_ascii=False, indent=1))
+        print(json.dumps(r, ensure_ascii=False, separators=(",", ":")))   # compact: the AI reads it, tokens count
         sys.exit(1 if r["status"] in ("failed", "needs_review") else 0)
     if a.cmd == "apply-edits":
         st = _load_state(a.state)
         edits = json.load(open(a.edits, encoding="utf-8"))
-        errors = _apply(st, edits.get("edits", edits) if isinstance(edits, dict) else edits, st.get("issues", []))
+        errors = _apply(st, edits.get("edits", edits) if isinstance(edits, dict) else edits, _host_issues(st))
         if not errors:
             st["stage"] = "edited"
+            _host_issues(st)   # the next batch is checked against the new line numbers
             _save_state(a.state, st)
         print(json.dumps({"version": __version__, "applied": not errors, "errors": errors}, ensure_ascii=False, indent=1))
         sys.exit(1 if errors else 0)
