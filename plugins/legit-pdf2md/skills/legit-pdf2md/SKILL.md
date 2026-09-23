@@ -16,7 +16,7 @@ Done means all five:
 4. The saved file was read back and its sha256 equals the pipeline's `clean_sha256`, and only then was the temporary Doc (if one was made) trashed.
 5. A short report (Step 6).
 
-**Re-invoked partway through?** (A long session can drop this file from context; reloading it is right.) Do not start over. Continue from the first unfinished step using what already exists: on the connector, the journal `/mnt/files/legit-pdf2md/txn-<file id>.json` and the state file `state-<file id>.json` beside it (the runtime file says how to read them); on the CLI, the temporary Doc id and the edit batches you kept. Running `pipeline` again without `--final` resumes from the state file and prints the current packet. Never make a second temporary Doc for a run that already has one.
+**Re-invoked partway through?** (A long session can drop this file from context; reloading it is right.) Do not start over. Composio can replace its sandbox between any two calls, so the record of a run lives in this chat, on every path: the file id, the account, the temporary Doc id, and every edit batch you have written. Keep all four in your replies as you go. With them, the runtime file's later steps rebuild the run and continue. Never make a second temporary Doc for a run that already has one.
 
 ## Why this matters
 
@@ -28,7 +28,7 @@ Google's own Markdown export is the cheapest way to get text out of a PDF, and t
 - **You** write edits for those lines (Step 3). You never retype the document.
 - **The check** (`pipeline --final`) compares the result with the export letter by letter and picture by picture. It is what makes the promise true, so never clean by hand when the script cannot run: stop and say so.
 
-The script and the Drive helper are fetched from this skill's public repo into Composio's workbench (a remote Python sandbox), so the user needs no Python and no coding setup:
+The script and the Drive helper are fetched from this skill's public repo into Composio's workbench (a remote Python sandbox), so the user needs no Python and no coding setup. Always fetch from this URL; never use a copy of the repo already in the sandbox, which can be an older version:
 `https://raw.githubusercontent.com/joeoliveimpact/legit-pdf2md/v0.2.0/plugins/legit-pdf2md/skills/legit-pdf2md/scripts/` + `clean_gdoc_md.py` or `drive_txn.py`
 
 ## Step 0: Find the Composio connection
@@ -51,7 +51,7 @@ Use only Composio for Drive. If the app also has its own Google Drive integratio
 
 ## Step 2: Export and run the pipeline
 
-A PDF is first copied to a temporary Google Doc in the user's private **My Drive root** (never the shared folder, which may carry a public link), with the document's OCR language (`en` unless it is in another language). That copy is where Google reads scanned pages. **On the connector, `drive_txn.py` makes and logs this copy: never make it yourself**, or it is a second copy nobody trashes. On the CLI you make it and keep its id. The Doc (or the temporary copy) is exported as `text/markdown`, and the export goes straight into the workbench: its download link expires in an hour, and the raw export (the expensive part) never enters the conversation.
+A PDF is first copied to a temporary Google Doc in the user's private **My Drive root** (never the shared folder, which may carry a public link), with the document's OCR language (`en` unless it is in another language). That copy is where Google reads scanned pages. **On the connector, `drive_txn.py` makes this copy in the start cell: never make it yourself**, or it is a second copy nobody trashes. On the CLI you make it. Either way, write its id into your reply at once. The Doc (or the temporary copy) is exported as `text/markdown`, and the export goes straight into the workbench: its download link expires in an hour, and the raw export (the expensive part) never enters the conversation.
 
 Then, in the workbench: `clean_gdoc_md.py pipeline export.md --state state.json`. It prints compact JSON:
 - `status: needs_host_edits` with a packet: `rev`, `ops_by_type`, and `issues`, a list of blocks. Each block has an `id` (`b3`), `types`, its `lines`, its `text` with every line numbered (`171| Make a free account.`), the lines just `before` and `after` it, and sometimes `suggested_drop` or `suggested_list` (both are lists). Go to Step 3.

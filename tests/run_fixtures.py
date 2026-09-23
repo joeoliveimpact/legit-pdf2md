@@ -621,6 +621,13 @@ class FakeDrive:
         if slug == "GOOGLEDRIVE_TRASH_FILE":
             f["trashed"] = self.trash_sticks
             return {"data": {"id": f["id"]}}, ""
+        if slug == "GOOGLEDRIVE_FIND_FILE":
+            name, folder = re.match(r"name = '(.*)' and '(.*)' in parents and trashed = false$", a["q"]).groups()
+            name = name.replace("\\'", "'").replace("\\\\", "\\")
+            hits = [{"id": x["id"], "name": x["name"]} for x in self.files.values()
+                    if x.get("name") == name and x.get("parent", (x.get("parents") or [None])[0]) == folder
+                    and not x.get("trashed")]
+            return {"data": {"files": hits, "kind": "drive#fileList"}}, ""
         raise AssertionError(slug)
 
 
@@ -722,6 +729,36 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
         later.export(os.path.join(d, "e.md"))
         _refused(lambda: later.save(text, ok, "Other - clean.md"), "a later cell dropped test mode")
         _refused(lambda: t.Txn(fd, "me", "src2", journals=d, test_folder="x"), "test folder switched mid-run")
+        # a sandbox reset between cells (/mnt/files empty): the temp Doc id carried in the chat rebuilds the run
+        fd = FakeDrive()
+        mk2 = lambda sub, **k: t.Txn(fd, "me", "src", journals=os.path.join(d, "reset", sub), fetch=fd.urls.__getitem__, **k)
+        a = mk2("a")
+        a.open()
+        a.export(os.path.join(d, "e.md"))
+        b = mk2("b", temp_doc="tmp1")   # fresh sandbox
+        b.open()
+        b.export(os.path.join(d, "e.md"))
+        assert fd.copies == 1 and b.j["temp_doc"] == "tmp1", (fd.copies, b.j)
+        lost = mk2("x")   # a later cell in a fresh sandbox with the id lost: stops, never a second copy
+        lost.open()
+        _refused(lambda: lost.export(os.path.join(d, "e.md"), copy=False), "a later cell made a new temp Doc")
+        assert fd.copies == 1
+        b.save(text, ok, "Guide - clean.md")
+        _refused(lambda: mk2("b", temp_doc="budget"), "a temp id from the chat that contradicts the journal")
+        c = mk2("c", temp_doc="tmp1")   # reset again between the save and the cleanup
+        c.open()
+        assert c.save(text, ok, "Guide - clean.md")["id"] == "out1" and len(fd.created()) == 1, fd.created()
+        assert c.cleanup() == {"temp_doc": "tmp1", "trashed": True}
+        assert "already trashed" in _refused(lambda: mk2("e", temp_doc="tmp1").open(), "a finished run restarted")
+        _refused(lambda: mk2("f", temp_doc="src").open(), "adopted the source as the temp Doc")
+        fd.files["budget"] = {"id": "budget", "name": "Budget", "mimeType": DOC, "parents": ["root"]}
+        _refused(lambda: mk2("g", temp_doc="budget").open(), "adopted someone else's Doc")
+        assert "trashed" not in fd.files["budget"] and "trashed" not in fd.files["src"]
+        # a same-named file with other content is not taken for this run's save
+        fd.files["prev"] = {"id": "prev", "name": "Notes - clean.md", "parent": "fold", "body": "# old\n"}
+        w = t.Txn(fd, "me", "doc", journals=os.path.join(d, "reset", "h"), fetch=fd.urls.__getitem__)
+        w.open()
+        assert w.save(text, ok, "Notes - clean.md")["id"] not in ("prev", None)
         # the OCR language reaches the copy
         fd = FakeDrive()
         x = t.Txn(fd, "me", "src", journals=d + "/o", fetch=fd.urls.__getitem__)

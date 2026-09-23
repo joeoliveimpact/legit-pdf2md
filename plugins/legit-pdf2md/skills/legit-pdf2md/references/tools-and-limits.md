@@ -44,6 +44,8 @@ Parameter casing differs between these tools; when a call fails validation, read
 - An AI can still move a real trailing number (`Chapter 3. 4`) into list position.
 
 **Drive**
-- Two runs on the same source file at the same moment share one journal. Run one at a time per file.
+- Composio can replace its workbench sandbox between any two calls, with `/mnt/files` empty. A run survives it only through what is kept in the chat: the temporary Doc id and the edit batches. If both the sandbox and that id are lost, the temporary Doc stays in My Drive and the user is told its name.
+- Two runs on the same source file at the same moment in one sandbox share one journal. Run one at a time per file.
+- The same Google Doc exports byte for byte the same every time, but two OCR copies of the same PDF can export slightly differently. So a re-run on an unchanged PDF can give a slightly different clean file; a byte-identical one already in the folder is reused, never saved twice.
 - On the CLI, the temporary Doc's id lives only in the conversation. If it is lost, the Doc is left in My Drive and the user is told its name.
 - A save whose read-back does not match leaves that file in Drive; the report names it.
