@@ -614,7 +614,7 @@ def _terminal(line):
     return bool(re.search(r"[.!?:;\"')\]]$", re.sub(r"[`*_]", "", line).strip()))
 
 
-def _edit(st, a, b, text, op, drops=(), reason=None):
+def _edit(st, a, b, text, op, drops=(), reason=None, movable=None):
     """Replace lines a..b (1-based, inclusive) of st["text"] under op's rule, keeping the letter map and ledger
     true. Returns an error string and changes nothing, or None. Rules (letters = the check's letter stream):
     replace: letters identical once the exact `drops` substrings are removed (those go to the ledger).
@@ -670,7 +670,16 @@ def _edit(st, a, b, text, op, drops=(), reason=None):
         words = collections.defaultdict(list)
         for k in range(k0, k1):
             words[wid[k - k0]].append(k)
-        cand = [ks for _, ks in sorted(words.items()) if all(ca[k].isdigit() and keep[pa[k] - c0] for k in ks)]
+        def standalone(ks):   # alone on its line, or the last word of a line that ends a sentence: "... account. 1"
+            ls = seg.rfind("\n", 0, pa[ks[0]] - c0) + 1
+            le = seg.find("\n", ls)
+            le = len(seg) if le < 0 else le
+            word, line = "".join(ca[k] for k in ks), seg[ls:le].strip()
+            last = not seg[pa[ks[-1]] - c0 + 1:le].strip()
+            return line == word or bool(last and TRAILING_NUMBER.match(line))
+
+        cand = [ks for _, ks in sorted(words.items())
+                if all(ca[k].isdigit() and keep[pa[k] - c0] for k in ks) and standalone(ks)]
         marks, off = [], c0
         for ln in text.split("\n"):
             m = re.match(r"\s*(\d+)[.)]\s", ln)
@@ -678,13 +687,13 @@ def _edit(st, a, b, text, op, drops=(), reason=None):
                 marks.append((m.group(1), [j for j in range(n0, n1) if off + m.start(1) <= pb[j] < off + m.end(1)]))
             off += len(ln) + 1
         mapped = None
-        for order in (cand, cand[::-1]):   # the number that belongs to the item is usually the first match or the last
-            used, picks = set(), []
+        for _ in (1,):   # markers keep their original order: each is the next stand-alone number after the last one
+            picks, after_k = [], -1
             for v, js in marks:
-                ks = next((ks for ks in order if id(ks) not in used and "".join(ca[k] for k in ks) == v), None)
+                ks = next((ks for ks in cand if ks[0] > after_k and "".join(ca[k] for k in ks) == v), None)
                 if ks is None or len(ks) != len(js):
                     break
-                used.add(id(ks))
+                after_k = ks[-1]
                 picks.append((js, ks))
             if len(picks) != len(marks):
                 continue
@@ -715,7 +724,8 @@ def _edit(st, a, b, text, op, drops=(), reason=None):
                 continue
             at = before.find(s)
             while at >= 0 and found is None:
-                if at in starts and at + len(s) in ends and \
+                if at in starts and at + len(s) in ends and (movable is None or
+                                                             {a + line_of[i] for i in range(at, at + len(s))} <= movable) and \
                         before[:at] + before[at + len(s):] == after[:j0] + after[j1:]:
                     found = (at, len(s), j0)
                 at = before.find(s, at + 1)
@@ -957,6 +967,7 @@ def _apply(st, edits, issues=None):
             if not all(e.get("op") in x["ops"] or x["safe_autofix"] for x in refs):
                 errors.append(f"edit {n}: op {e.get('op')!r} is not allowed for {ids}")
                 continue
+            e = {**e, "_movable": {ln for x in refs for ln in x["flagged"]}}   # only flagged lines may move
         spans.append((a, b, n, e))
     spans.sort(key=lambda s: -s[0])
     for (a, b, n, _), (a2, b2, n2, _) in zip(spans, spans[1:]):
@@ -966,7 +977,7 @@ def _apply(st, edits, issues=None):
         return errors
     work = {"text": st["text"], "lmap": list(st["lmap"]), "ledger": list(st["ledger"]), "audit": list(st["audit"])}
     for a, b, n, e in spans:
-        err = _edit(work, a, b, e.get("text", ""), e.get("op"), e.get("drops") or (), e.get("reason"))
+        err = _edit(work, a, b, e.get("text", ""), e.get("op"), e.get("drops") or (), e.get("reason"), e.get("_movable"))
         if err:
             errors.append(f"edit {n} (lines {a}-{b}): {err}")
     if not errors:

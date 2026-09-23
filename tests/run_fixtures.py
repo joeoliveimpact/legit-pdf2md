@@ -424,6 +424,24 @@ def reconcile_edge_cases(m):
         assert m._apply(st, [{"op": "number_list", "lines": [1, 1], "text": "Buy 3 get 7 free today."}]), "digits swapped"
         st = m._new_state("This is not safe at all.\n")
         assert m._apply(st, [{"op": "move_heading", "lines": [1, 1], "text": "This is safe at all.\n\nnot"}]), "word lifted"
+        st = m._new_state("Take 3.5 mg daily\n\n1\n\nSecond item here\n\n2\n")   # a number from inside a sentence
+        assert m._apply(st, [{"op": "number_list", "lines": [1, 3], "text": "5. Take 3. mg daily\n\n1"}]), "mid-sentence number"
+        st = m._new_state("Alpha item\n\n1\n\nBeta item\n\n2\n")   # markers keep their order
+        assert m._apply(st, [{"op": "number_list", "lines": [1, 7], "text": "2. Alpha item\n1. Beta item"}]), "markers swapped"
+        assert not m._apply(st, [{"op": "number_list", "lines": [1, 7], "text": "1. Alpha item\n2. Beta item"}])
+        # only flagged lines may move: a plain sentence line next to a flagged heading stays where it is
+        exp = "Intro line.\n\nDo not\nW H Y\npress the red button.\n\nEnd.\n"
+        p2 = os.path.join(d, "u.json")
+        m.pipeline(exp, p2)
+        st = m._load_state(p2)
+        L = st["text"].split("\n")
+        a, b = L.index("Do not") + 1, L.index("press the red button.") + 1
+        blk = next(x for x in st["issues"] if x["lines"][0] <= a + 1 <= x["lines"][1])
+        assert m._apply(st, [{"issue": blk["id"], "op": "move_heading", "lines": [a, b],
+                               "text": "W H Y\npress the red button.\nDo not"}], st["issues"]), "sentence line moved"
+        # a hand-edited ledger pointing outside the export is thrown away, never a traceback
+        m._save_state(p2, {**st, "ledger": [{"letters": [0, 10 ** 6], "reason": "x"}]})
+        assert m.pipeline(exp, p2, final=True)["status"] in ("validated", "failed", "needs_review")
         # a letter map that no longer matches its text: never validated, never a traceback
         p = os.path.join(d, "t.json")
         m.pipeline(GUIDE, p)
