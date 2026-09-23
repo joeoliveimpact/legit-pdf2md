@@ -564,6 +564,121 @@ def one_version_everywhere(m):
     assert len(v) == 7 and None not in v.values() and len(set(v.values())) == 1, v
 
 
+# ---------------------------------------------------------------- D2: Drive transaction (fake Drive)
+
+class FakeDrive:
+    """Just enough Drive for drive_txn: files by id, a log of calls, and switches for the failures."""
+    def __init__(self, deny_parent=None, corrupt_readback=False, copy_id=True):
+        self.files = {"src": {"id": "src", "name": "Guide.pdf", "mimeType": PDF, "parents": ["fold"]},
+                      "doc": {"id": "doc", "name": "Notes", "mimeType": DOC, "parents": ["fold"]}}
+        self.log, self.urls, self.n = [], {}, 0
+        self.deny_parent, self.corrupt, self.copy_id = deny_parent, corrupt_readback, copy_id
+
+    def _url(self, text):
+        self.n += 1
+        self.urls[f"u{self.n}"] = text
+        return {"file": {"s3url": f"u{self.n}"}}
+
+    def __call__(self, slug, a, account=None):
+        self.log.append((slug, a.get("fileId") or a.get("file_id") or a.get("file_name")))
+        f = self.files.get(a.get("fileId") or a.get("file_id"), {})
+        if slug == "GOOGLEDRIVE_GET_FILE_METADATA":
+            return ({"data": dict(f)}, "") if f else ({"data": None}, "404 File not found")
+        if slug == "GOOGLEDRIVE_COPY_FILE_ADVANCED":
+            self.files["tmp"] = {"id": "tmp", "name": a["name"], "mimeType": DOC, "parents": ["root"], "body": "Export.\n"}
+            return {"data": {"id": "tmp"} if self.copy_id else {"name": a["name"]}}, ""
+        if slug == "GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE":
+            return {"data": self._url(f.get("body", "Export.\n"))}, ""
+        if slug == "GOOGLEDRIVE_CREATE_FILE_FROM_TEXT":
+            if a.get("parent_id") and a["parent_id"] == self.deny_parent:
+                return {"data": None}, "403 The user does not have sufficient permissions for this file."
+            self.files["out"] = {"id": "out", "name": a["file_name"], "body": a["text_content"] + ("x" if self.corrupt else "")}
+            return {"data": {"id": "out"}}, ""
+        if slug == "GOOGLEDRIVE_DOWNLOAD_FILE":
+            return {"data": {"downloaded_file_content": self._url(f["body"])}}, ""
+        if slug == "GOOGLEDRIVE_TRASH_FILE":
+            f["trashed"] = True
+            return {"data": {"id": f["id"]}}, ""
+        raise AssertionError(slug)
+
+
+@fixture
+def drive_txn_saves_verifies_then_trashes_only_its_own(m):
+    spec = importlib.util.spec_from_file_location("drive_txn", os.path.join(os.path.dirname(m.__file__), "drive_txn.py"))
+    t = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(t)
+    text = "# Guide\n\nClean text.\n"
+    with tempfile.TemporaryDirectory() as d:
+        j = os.path.join(d, "txn.json")
+        fd = FakeDrive()
+        mk = lambda **k: t.Txn(fd, "me", journal=j, fetch=fd.urls.__getitem__, **k)
+        x = mk()
+        x.open("src")
+        x.export(os.path.join(d, "export.md"))
+        assert open(os.path.join(d, "export.md"), encoding="utf-8").read() == "Export.\n"
+        for bad in (lambda: x.cleanup(), lambda: x.save(text + "!", t.sha(text), "Guide - clean.md")):
+            try:   # no trash before a verified save; no save of text that is not the checked text
+                bad()
+                raise AssertionError("should have refused")
+            except t.DriveError:
+                pass
+        assert not any(s == "GOOGLEDRIVE_CREATE_FILE_FROM_TEXT" for s, _ in fd.log)
+        assert x.save(text, t.sha(text), "Guide - clean.md")["where"] == "beside the source"
+        assert mk().cleanup() == {"temp_doc": "tmp", "trashed": True}   # a later cell: the journal carries the id
+        assert [i for s, i in fd.log if s == "GOOGLEDRIVE_TRASH_FILE"] == ["tmp"] and "trashed" not in fd.files["src"]
+        # a read-back that differs: raised, and the temporary Doc stays
+        os.remove(j)
+        fd = FakeDrive(corrupt_readback=True)
+        x = mk()
+        x.open("src")
+        x.export(os.path.join(d, "e.md"))
+        try:
+            x.save(text, t.sha(text), "Guide - clean.md")
+            raise AssertionError("read-back mismatch passed")
+        except t.DriveError as e:
+            assert "read-back" in str(e)
+        try:
+            x.cleanup()
+            raise AssertionError("trashed after a failed read-back")
+        except t.DriveError:
+            assert not any(s == "GOOGLEDRIVE_TRASH_FILE" for s, _ in fd.log)
+        # a new source reports the earlier run's untrashed temp Doc instead of trashing it
+        assert mk().open("doc") and json.load(open(j))["left_from_earlier_run"] == "tmp"
+        # no permission beside the source: My Drive root, and it says so; never in test mode
+        os.remove(j)
+        fd = FakeDrive(deny_parent="fold")
+        x = mk()
+        x.open("doc")
+        assert "My Drive root" in x.save(text, t.sha(text), "Notes - clean.md")["where"]
+        os.remove(j)
+        for k, deny in (({"test_folder": "fold"}, "fold"), ({"test_folder": "elsewhere"}, None)):
+            fd = FakeDrive(deny_parent=deny)
+            x = mk(**k)
+            x.open("doc")
+            try:
+                x.save(text, t.sha(text), "Notes - clean.md")
+                raise AssertionError(("test mode saved", k))
+            except t.DriveError:
+                assert "out" not in fd.files, k   # no fallback save anywhere else
+            os.remove(j)
+        # a copy that returns no id: stop and say where the Doc is, never guess
+        fd = FakeDrive(copy_id=False)
+        x = mk()
+        x.open("src")
+        try:
+            x.export(os.path.join(d, "e.md"))
+            raise AssertionError("untracked temp Doc")
+        except t.DriveError as e:
+            assert "Guide - temp" in str(e)
+        # a journal whose temp Doc is the source itself (damaged, or a copy that echoed the source id)
+        json.dump({"source": fd.files["src"], "temp_doc": "src", "saved_ok": True}, open(j, "w"))
+        try:
+            mk().cleanup()
+            raise AssertionError("trashed the source")
+        except t.DriveError:
+            assert "trashed" not in fd.files["src"]
+
+
 # ---------------------------------------------------------------- runner
 
 def load(path):
