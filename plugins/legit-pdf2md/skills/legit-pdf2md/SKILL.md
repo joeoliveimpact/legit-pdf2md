@@ -23,7 +23,7 @@ Google's own Markdown export is the cheapest way to get text out of a PDF, and t
 
 Every Drive step below runs through Composio, which reaches this skill two ways. **Find which one is live before doing anything else.** (If the user already handed you an exported `.md`, skip to Step 3's local-file route.) Do not assume, and do not ask the user to describe their setup when you can look.
 
-**1. MCP connector (Claude Chat, and usually Cowork and Claude Code).** Look for Composio's Google Drive tools in this session: `GOOGLEDRIVE_FIND_FILE` and friends, or a `run_composio_tool` / `COMPOSIO_SEARCH_TOOLS` wrapper. If they are there, check Drive is connected: `COMPOSIO_MANAGE_CONNECTIONS` with `{"toolkits": [{"name": "googledrive", "action": "list"}]}` must show an `ACTIVE` account. Then go to Step 1. This is the connection the setup guide teaches, so it is the one most people will have.
+**1. MCP connector (Claude Chat, and usually Cowork and Claude Code).** Look for Composio's tools in this session: the Drive tools by name (`GOOGLEDRIVE_FIND_FILE` and friends), or its meta-tools (`COMPOSIO_SEARCH_TOOLS`, `COMPOSIO_MULTI_EXECUTE_TOOL`, `COMPOSIO_REMOTE_WORKBENCH`). If they are there, check Drive is connected: `COMPOSIO_MANAGE_CONNECTIONS` with `{"toolkits": [{"name": "googledrive", "action": "list"}]}` must show an `ACTIVE` account. Then go to Step 1. This is the connection the setup guide teaches, so it is the one most people will have.
 
 Through the connector the Drive tools this skill names are **not called directly**: pass each slug and its arguments to `COMPOSIO_MULTI_EXECUTE_TOOL`, or call `run_composio_tool(slug, args, account=...)` inside `COMPOSIO_REMOTE_WORKBENCH`. The arguments are the same. `COMPOSIO_SEARCH_TOOLS` will also offer its own plan for a PDF (download it and parse with `pdfplumber`). **Ignore that plan and follow this skill:** `pdfplumber` has no OCR, so a scanned PDF comes back empty, and its output is not the Docs export the cleaner is built for.
 
@@ -37,7 +37,7 @@ composio connections list       # JSON keyed by toolkit slug
 In `connections list`, find `googledrive` and read the `status` of each entry. Then call tools as `composio execute GOOGLEDRIVE_FIND_FILE -d '{ ... }'`. The tool names and arguments are identical to the MCP ones, so the rest of this skill is unchanged.
 
 - **`ACTIVE` is the only status that works.** `EXPIRED` appears exactly like a live connection in a plain listing and fails on the first call. Check the word, not the presence of the key.
-- **On Windows, if `composio` is not found** ("command not found", or "is not recognized" in PowerShell), the CLI is often installed inside WSL. Try `wsl.exe -e bash -lc 'composio whoami'` before concluding it is missing. If that answers, run **every** composio command the same way from the Bash tool, arguments as a double-quoted object: `wsl.exe -e bash -lc 'composio execute GOOGLEDRIVE_GET_ABOUT -d "{ }"'`, or `-d "{ fileId: \"<id>\" }"` with values.
+- **On Windows, if `composio` is not found** ("command not found", or "is not recognized" in PowerShell), the CLI is often installed inside WSL. Try `wsl.exe -e bash -lc 'composio whoami'` before concluding it is missing. If that answers, run **every** composio command the same way from the Bash tool, arguments as a double-quoted object: `wsl.exe -e bash -lc 'composio execute GOOGLEDRIVE_GET_ABOUT -d "{ }"'`, or `-d "{ fileId: \"<id>\" }"` with values. For anything longer or with quotes in it (a workbench cell, Step 6's text, a title with an apostrophe), write the JSON to a file in a folder with no spaces and pass its WSL path: `-d @/mnt/c/Users/<you>/cell.json`.
 
 **3. Neither.** Say so plainly, name which of the two you looked for, and give them the choice:
 - **Connect it.** About five minutes, once: the setup guide that came with this skill walks through the MCP connector, or `composio link googledrive` from a shell. Then re-invoke this skill and it runs end to end.
@@ -45,7 +45,7 @@ In `connections list`, find `googledrive` and read the `status` of each entry. T
 
 Never guess a path and let it fail at the first Drive call; a 401 or an empty tool list four steps in reads to the user as a broken skill.
 
-**Two accounts on one toolkit is normal and is not a failure.** `connections list` shows one entry per connected account, and Composio refuses Drive calls until you name one: pass `--account` with the entry's `word_id` from `connections list` (an alias works too) on the CLI, or `account` on the MCP call. Confirm the choice with `GOOGLEDRIVE_GET_ABOUT` before any write. Step 1 covers what to do when the account is wrong. The connector and the CLI can list different accounts for the same toolkit (one real setup: four through the connector, two through the CLI). The connector marks one account `is_default`; start there.
+**Two accounts on one toolkit is normal and is not a failure.** `connections list` shows one entry per connected account, and Composio refuses Drive calls until you name one: pass `--account` with the entry's `word_id` from `connections list` (an alias works too) on the CLI, or `account` on the MCP call (the account ID or alias from `COMPOSIO_MANAGE_CONNECTIONS` with `action: "list"`). Confirm the choice with `GOOGLEDRIVE_GET_ABOUT` before any write. Step 1 covers what to do when the account is wrong. The connector and the CLI can list different accounts for the same toolkit (one real setup: four through the connector, two through the CLI). The connector marks one account `is_default`; start there.
 
 ## Step 1: Find the file
 
@@ -68,9 +68,9 @@ Never guess a path and let it fail at the first Drive call; a 401 or an empty to
 
 **Export** with `GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE` (`fileId`, `mimeType: text/markdown`). It returns a temporary download link at `data.file.s3url` that expires after an hour, so fetch it straight away. `GOOGLEDRIVE_DOWNLOAD_FILE` with `mime_type: text/markdown` is the fallback.
 
-**If you made a temporary Doc**, move it to the trash once the export is downloaded: `GOOGLEDRIVE_TRASH_FILE` with `file_id` (snake case; this tool rejects `fileId`). Read its metadata again and confirm `trashed: true`. Trash is recoverable for 30 days. Only ever trash a Doc this skill created, and never delete permanently.
+**If you made a temporary Doc**, move it to the trash once Step 5 has passed (Step 5 re-downloads the export link, and an expired link means exporting that Doc again): `GOOGLEDRIVE_TRASH_FILE` with `file_id` (snake case; this tool rejects `fileId`). Read its metadata again and confirm `trashed: true`. Trash is recoverable for 30 days. Only ever trash a Doc this skill created, and never delete permanently.
 
-**The cleanup always runs in Composio's workbench** (`COMPOSIO_REMOTE_WORKBENCH`, a remote Python sandbox), on every path: Claude chat, Cowork, Claude Code, ChatGPT, the connector or the CLI. Nothing runs on the user's computer, so no Python and no coding setup are needed, and the raw export (the expensive part) never enters the conversation.
+**With Composio, the cleanup always runs in its workbench** (`COMPOSIO_REMOTE_WORKBENCH`, a remote Python sandbox), on every path: Claude chat, Cowork, Claude Code, ChatGPT, the connector or the CLI. Nothing runs on the user's computer, so no Python and no coding setup are needed, and the raw export (the expensive part) never enters the conversation.
 
 Workbench files are not guaranteed to survive between calls (on the CLI every call is a fresh sandbox), so each cell in Steps 3 and 5 fetches what it needs itself: the export from its link, and the script from this skill's public repo:
 `https://raw.githubusercontent.com/joeoliveimpact/legit-pdf2md/main/plugins/legit-pdf2md/skills/legit-pdf2md/scripts/clean_gdoc_md.py`
@@ -82,11 +82,11 @@ One workbench cell: download the export link to `export.md` and the script to `c
 `subprocess.run([sys.executable, "clean_gdoc_md.py", "strip", "export.md", "-o", "clean.md"], capture_output=True, text=True)`,
 then print the script's JSON output and the contents of `clean.md`. The stripped text is small; it is what Step 4 edits.
 
-**On the CLI**, write the cell to a JSON file as `{"code_to_execute": "..."}` and run `composio execute COMPOSIO_REMOTE_WORKBENCH -d @<file>`. With the CLI inside WSL, pass the WSL path: `-d @$(wslpath -u '<windows path>')`.
+**On the CLI**, write the cell to a JSON file as `{"code_to_execute": "..."}` and run `composio execute COMPOSIO_REMOTE_WORKBENCH -d @<file>` (with the CLI inside WSL, the `/mnt/c/...` path from Step 0).
 
 **If the workbench fails**, say so and stop. Never clean the Markdown by hand: the script and its check are what make the wording guarantee true.
 
-**Local-file route** (the user handed you a `.md`, so there is no export link): the workbench cannot see a local file, so run the same two commands with this session's own Python instead: the chat app's code execution, or `python3` (`py -3` on Windows) on the script in this skill's `scripts/` folder.
+**Local-file route** (the user handed you a `.md`, no Composio needed): the workbench cannot see a local file, so use this session's own Python (the chat app's code execution, or `python3`; `py -3` on Windows) with the script in this skill's `scripts/` folder: `strip <their file> -o clean.md` here, and `check <their file> clean.md` in Step 5. Skip Step 6: save the clean file beside theirs, or in the chat app offer it as a download. No Python at all: say so and stop.
 
 It works outside fenced code blocks only; code blocks (including ones inside quotes and lists) and inline code are never touched. It removes base64 images (leaving `[image N]` placeholders), `&nbsp;` and other entities, broken characters, Google's backslash escapes, the code-font backticks the Drive API export wraps around letter-spaced text and bare step numbers, asterisks that OCR scatters between letters, trailing spaces and extra blank lines. It never changes wording. It prints JSON with `stats` and a `worklist`.
 
