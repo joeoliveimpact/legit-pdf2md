@@ -1,21 +1,23 @@
 """Drive steps for legit-pdf2md on the Composio connector: one run's copy, export, save and cleanup.
 
 Runs inside COMPOSIO_REMOTE_WORKBENCH, where run_composio_tool is preloaded and /mnt/files persists between
-calls. Pass run_composio_tool in as `call`. Every id this run creates goes into its journal before anything
-else happens, so cleanup trashes exactly the temporary Doc this run made and nothing else, and only after the
-clean file was saved, read back and matched the text that passed the check. Standard library + requests.
+calls. Pass run_composio_tool in as `call`. Each source file gets its own journal, and every id this run
+creates goes into it before anything else happens, so cleanup trashes exactly the temporary Doc this run made
+and nothing else, and only after the clean file was saved, read back and matched the text that passed the
+check. Standard library + requests.
 
-  txn = Txn(run_composio_tool, account="me@example.com")
-  txn.open(file_id)                   # metadata, kept in the journal
+  txn = Txn(run_composio_tool, "me@example.com", file_id)
+  txn.open()                          # metadata, kept in the journal
   txn.export("export.md")             # a PDF is copied to a temporary Doc (OCR) in My Drive first
   txn.save(text, clean_sha256, name)  # save beside the source, read back, compare hashes
   txn.cleanup()                       # trash the temporary Doc, confirm it is trashed
+
+A later cell builds Txn with the same file id and carries on from the journal (test mode included).
 """
-import hashlib, json, os
+import hashlib, json, os, re
 
 DOC = "application/vnd.google-apps.document"
-JOURNAL = "/mnt/files/legit-pdf2md/txn.json"
-NO_ROOM = ("insufficient", "permission", "forbidden", "403", "cannot add", "not have")   # can't save beside it
+JOURNALS = "/mnt/files/legit-pdf2md"
 
 
 class DriveError(Exception):
@@ -27,7 +29,7 @@ def sha(text):
 
 
 def _find(data, key):
-    """The first value under key anywhere in a tool response (Composio nests links a few levels down)."""
+    """The first value under key anywhere in a tool response (Composio nests download links a level down)."""
     if isinstance(data, dict):
         if data.get(key):
             return data[key]
@@ -40,6 +42,13 @@ def _find(data, key):
     return None
 
 
+def _no_room(err):
+    """A save refused because this account may not add files to the folder. Rate limits, quotas and missing
+    files are other failures: those stop the run instead of saving somewhere else."""
+    e = str(err).lower()
+    return ("permission" in e or "cannot add" in e) and not any(w in e for w in ("rate limit", "quota", "not found"))
+
+
 def _fetch(url):
     import requests
     r = requests.get(url, timeout=60)
@@ -48,12 +57,16 @@ def _fetch(url):
 
 
 class Txn:
-    def __init__(self, call, account=None, journal=JOURNAL, test_folder=None, fetch=_fetch):
-        self.call, self.account, self.path, self.test_folder, self.fetch = call, account, journal, test_folder, fetch
-        self.j = json.load(open(journal, encoding="utf-8")) if os.path.exists(journal) else {}
+    def __init__(self, call, account, source, test_folder=None, journals=JOURNALS, fetch=_fetch):
+        self.call, self.account, self.source, self.fetch = call, account, source, fetch
+        self.path = os.path.join(journals, "txn-" + re.sub(r"[^\w-]", "_", source) + ".json")
+        self.j = json.load(open(self.path, encoding="utf-8")) if os.path.exists(self.path) else {}
+        if test_folder and self.j.get("test_folder") not in (None, test_folder):
+            raise DriveError(f"this run is in test mode for folder {self.j['test_folder']}, not {test_folder}")
+        self.test_folder = test_folder or self.j.get("test_folder")   # a later cell cannot drop test mode
 
     def _save_journal(self):
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
         with open(self.path + ".tmp", "w", encoding="utf-8") as f:
             json.dump(self.j, f)
         os.replace(self.path + ".tmp", self.path)
@@ -65,15 +78,17 @@ class Txn:
             raise DriveError(f"{slug}: {err or (r.get('error') if isinstance(r, dict) else r) or 'no data'}")
         return data
 
-    def open(self, file_id):
-        """The source's metadata. A new source, or the same one after a finished run, starts a new journal (an
-        earlier temp Doc that was never trashed is reported, not trashed: it may belong to a run still going)."""
-        meta = self._run("GOOGLEDRIVE_GET_FILE_METADATA", {"fileId": file_id, "supportsAllDrives": True,
+    def open(self):
+        """The source's metadata. A finished run starts a new journal; its temp Doc, if cleanup never trashed
+        it, is reported rather than trashed."""
+        meta = self._run("GOOGLEDRIVE_GET_FILE_METADATA", {"fileId": self.source, "supportsAllDrives": True,
                          "fields": "id,name,mimeType,parents,driveId,modifiedTime"})
-        if self.j.get("source", {}).get("id") != file_id or self.j.get("saved_ok"):
+        if self.j.get("saved_ok") or not self.j:
             left = self.j.get("temp_doc") if not self.j.get("temp_trashed") else None
-            self.j = {"source": meta, **({"left_from_earlier_run": left} if left else {})}
-            self._save_journal()
+            self.j = {**({"left_from_earlier_run": left} if left else {}),
+                      **({"test_folder": self.test_folder} if self.test_folder else {})}
+        self.j["source"] = meta
+        self._save_journal()
         return meta
 
     def export(self, path):
@@ -83,13 +98,17 @@ class Txn:
         doc = src["id"]
         if src["mimeType"] != DOC:
             if not self.j.get("temp_doc"):
-                name = src["name"][:-4] if src["name"].lower().endswith(".pdf") else src["name"]
+                name = (src["name"][:-4] if src["name"].lower().endswith(".pdf") else src["name"]) + " - temp"
+                if self.j.get("copy_started"):   # a crash between a copy and its log: that Doc may exist
+                    self.j["possible_orphan"] = f"'{self.j['copy_started']}' in My Drive (a copy whose id was lost)"
+                self.j["copy_started"] = name
+                self._save_journal()
                 data = self._run("GOOGLEDRIVE_COPY_FILE_ADVANCED", {"fileId": doc, "mimeType": DOC, "ocrLanguage": "en",
-                                 "supportsAllDrives": True, "name": f"{name} - temp", "parents": ["root"]})
-                self.j["temp_doc"] = _find(data, "id")
-                if not self.j["temp_doc"]:
-                    raise DriveError("the copy returned no id, so the temporary Doc cannot be tracked; look for "
-                                     f"'{name} - temp' in My Drive and trash it by hand")
+                                 "supportsAllDrives": True, "name": name, "parents": ["root"]})
+                if not data.get("id"):
+                    raise DriveError(f"the copy returned no id, so the temporary Doc cannot be tracked; look for "
+                                     f"'{name}' in My Drive and trash it by hand")
+                self.j["temp_doc"] = data["id"]
                 self._save_journal()
             doc = self.j["temp_doc"]
         url = _find(self._run("GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE", {"fileId": doc, "mimeType": "text/markdown"}), "s3url")
@@ -110,25 +129,28 @@ class Txn:
         parent = (self.j["source"].get("parents") or [None])[0]
         if self.test_folder and parent != self.test_folder:
             raise DriveError(f"test mode: the source is not in the test folder {self.test_folder}; not saved")
-        where = "beside the source"
-        try:
-            data = self._run("GOOGLEDRIVE_CREATE_FILE_FROM_TEXT", {"file_name": name, "text_content": text,
-                             "mime_type": "text/markdown", **({"parent_id": parent} if parent else {})})
-        except DriveError as e:
-            if self.test_folder or not parent or not any(w in str(e).lower() for w in NO_ROOM):
-                raise
-            data = self._run("GOOGLEDRIVE_CREATE_FILE_FROM_TEXT", {"file_name": name, "text_content": text,
-                             "mime_type": "text/markdown"})
-            where = "My Drive root (no permission to add files to the source's folder)"
-        saved = _find(data, "id")
-        if not saved:
+        args = {"file_name": name, "text_content": text, "mime_type": "text/markdown"}
+        if parent:
+            where = "beside the source"
+            try:
+                data = self._run("GOOGLEDRIVE_CREATE_FILE_FROM_TEXT", {**args, "parent_id": parent})
+            except DriveError as e:
+                if self.test_folder or not _no_room(e):
+                    raise
+                data = self._run("GOOGLEDRIVE_CREATE_FILE_FROM_TEXT", args)
+                where = "My Drive root (no permission to add files to the source's folder)"
+        else:
+            data = self._run("GOOGLEDRIVE_CREATE_FILE_FROM_TEXT", args)
+            where = "My Drive root (Drive shows this account no folder for the source)"
+        if not data.get("id"):
             raise DriveError("the save returned no file id; check Drive before running again")
-        self.j.update(saved={"id": saved, "name": name, "where": where}, saved_ok=False)
+        self.j.update(saved={"id": data["id"], "name": name, "where": where}, saved_ok=False)
         self._save_journal()
-        url = _find(self._run("GOOGLEDRIVE_DOWNLOAD_FILE", {"fileId": saved}), "s3url")
-        back = self.fetch(url) if url else ""
-        if sha(back) != clean_sha256:
-            raise DriveError(f"read-back of {saved} does not match the checked text; the temporary Doc is kept")
+        url = _find(self._run("GOOGLEDRIVE_DOWNLOAD_FILE", {"fileId": data["id"]}), "s3url")
+        if not url:
+            raise DriveError(f"read-back of {data['id']} returned no download link; the temporary Doc is kept")
+        if sha(self.fetch(url)) != clean_sha256:
+            raise DriveError(f"read-back of {data['id']} does not match the checked text; the temporary Doc is kept")
         self.j["saved_ok"] = True
         self._save_journal()
         return self.j["saved"]
@@ -140,7 +162,7 @@ class Txn:
             return {"temp_doc": doc, "trashed": bool(doc)}
         if not self.j.get("saved_ok"):
             raise DriveError("the clean file has not been saved and verified; the temporary Doc stays")
-        if doc == self.j["source"]["id"]:
+        if doc in (self.source, self.j["source"]["id"]):
             raise DriveError("refusing to trash the source file")
         self._run("GOOGLEDRIVE_TRASH_FILE", {"file_id": doc, "supportsAllDrives": True})
         meta = self._run("GOOGLEDRIVE_GET_FILE_METADATA", {"fileId": doc, "fields": "trashed", "supportsAllDrives": True})
