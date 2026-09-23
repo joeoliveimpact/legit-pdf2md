@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.2 - 2026-09-22
+
+- **Windows: use `py -3`.** On Windows, `python` and `python3` are often Microsoft Store shortcuts that print "Python was not found" and run nothing. SKILL.md and the README now say to use the `py` launcher there, and what that message means when it appears.
+- **The tools table and the known limits moved to `references/tools-and-limits.md`.** SKILL.md is read in full every time the skill runs; these two sections are only needed when a call fails validation or the wording check reports something unexpected. SKILL.md points to the file and says when to open it.
+
+Six more from a cold read of Steps 0 and 3 under four setups (Windows with the CLI in WSL, the MCP connector, the chat app, no Composio at all):
+
+- **Windows with the CLI in WSL now works past Step 0.** The skill showed the WSL wrapper for `whoami` only. It now says every composio command runs that way, with a quoting form tested on a live CLI, and that the export downloads on the Windows side where `py -3` can read it.
+- **The connector path checks Drive is `ACTIVE` before Step 1**, the same as the CLI path already did, so a dead connection fails at the check and not four steps in.
+- **`--account` says where its value comes from**: the `word_id` in `connections list`, or an alias.
+- **The script path fallback no longer doubles a folder.** "The base directory this skill was loaded from" already ends in `skills/legit-pdf2md`; the skill now names `scripts/clean_gdoc_md.py` inside it.
+- **No more hand-cleaning fallback.** The last-resort option said to clean the export in chat, which contradicted the rule that the script and its check are what keep your wording intact. With nowhere to run the script, the skill now stops and says so.
+- **A hand-exported `.md` skips straight to Step 3** and the clean file is saved beside it, instead of the skill hunting for a Drive connection it does not need. The workbench path now says how to run the script there and where to keep the files between steps.
+
 ## 0.1.1 - 2026-09-22
 
 Five fixes found by running v0.1.0 end to end on a second machine, against a real 12-page PDF.
