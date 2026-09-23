@@ -21,7 +21,7 @@ Google's own Markdown export is the cheapest way to get text out of a PDF, and t
 
 ## Step 0: Find the Composio connection
 
-Every Drive step below runs through Composio, which reaches this skill two ways. **Find which one is live before doing anything else.** (If the user already handed you an exported `.md`, skip to Step 3.) Do not assume, and do not ask the user to describe their setup when you can look.
+Every Drive step below runs through Composio, which reaches this skill two ways. **Find which one is live before doing anything else.** (If the user already handed you an exported `.md`, skip to Step 3's local-file route.) Do not assume, and do not ask the user to describe their setup when you can look.
 
 **1. MCP connector (Claude Chat, and usually Cowork and Claude Code).** Look for Composio's Google Drive tools in this session: `GOOGLEDRIVE_FIND_FILE` and friends, or a `run_composio_tool` / `COMPOSIO_SEARCH_TOOLS` wrapper. If they are there, check Drive is connected: `COMPOSIO_MANAGE_CONNECTIONS` with `{"toolkits": [{"name": "googledrive", "action": "list"}]}` must show an `ACTIVE` account. Then go to Step 1. This is the connection the setup guide teaches, so it is the one most people will have.
 
@@ -41,7 +41,7 @@ In `connections list`, find `googledrive` and read the `status` of each entry. T
 
 **3. Neither.** Say so plainly, name which of the two you looked for, and give them the choice:
 - **Connect it.** About five minutes, once: the setup guide that came with this skill walks through the MCP connector, or `composio link googledrive` from a shell. Then re-invoke this skill and it runs end to end.
-- **Skip the connection this time.** They do the Drive steps by hand (upload the PDF to Drive, open it with Google Docs, File > Download > Markdown), hand you the `.md`, and you start at Step 3. The cleanup script needs no connection, no API key and no network.
+- **Skip the connection this time.** They do the Drive steps by hand (upload the PDF to Drive, open it with Google Docs, File > Download > Markdown), hand you the `.md`, and you take Step 3's local-file route. The cleanup script needs no connection, no API key and no network.
 
 Never guess a path and let it fail at the first Drive call; a 401 or an empty tool list four steps in reads to the user as a broken skill.
 
@@ -70,40 +70,29 @@ Never guess a path and let it fail at the first Drive call; a 401 or an empty to
 
 **If you made a temporary Doc**, move it to the trash once the export is downloaded: `GOOGLEDRIVE_TRASH_FILE` with `file_id` (snake case; this tool rejects `fileId`). Read its metadata again and confirm `trashed: true`. Trash is recoverable for 30 days. Only ever trash a Doc this skill created, and never delete permanently.
 
-Where the download and the script run matters, because the raw export is the expensive part. Use the first option that works:
-1. **Claude Code:** download the link to a local file and run the script locally. On Windows, download it from the Windows shell, not inside WSL, so `py -3` can read it.
-2. **Composio remote workbench** (`COMPOSIO_REMOTE_WORKBENCH`, in the chat app): fetch the link inside the workbench and run the script there. Get the script from this skill's public repo, save it under `/mnt/files/` (files there survive between calls, so Step 5 finds them) and run it from the notebook with `subprocess.run([sys.executable, "clean_gdoc_md.py", "strip", ...])`:
-   `https://raw.githubusercontent.com/joeoliveimpact/legit-pdf2md/main/plugins/legit-pdf2md/skills/legit-pdf2md/scripts/clean_gdoc_md.py`
-   No local Python is needed, and the raw export never enters the conversation.
-3. **Code execution in the chat app:** fetch and run the script in the sandbox, if it can reach the link.
-4. **Nowhere to run the script:** stop and say so. Do not clean it by hand: without the script and its check, item 3 of the output contract cannot be met. Point the user to Claude Code or the Composio connector.
+**The cleanup always runs in Composio's workbench** (`COMPOSIO_REMOTE_WORKBENCH`, a remote Python sandbox), on every path: Claude chat, Cowork, Claude Code, ChatGPT, the connector or the CLI. Nothing runs on the user's computer, so no Python and no coding setup are needed, and the raw export (the expensive part) never enters the conversation.
+
+Workbench files are not guaranteed to survive between calls (on the CLI every call is a fresh sandbox), so each cell in Steps 3 and 5 fetches what it needs itself: the export from its link, and the script from this skill's public repo:
+`https://raw.githubusercontent.com/joeoliveimpact/legit-pdf2md/main/plugins/legit-pdf2md/skills/legit-pdf2md/scripts/clean_gdoc_md.py`
+Keep the export link for Step 5. It expires after an hour; if it has, export again.
 
 ## Step 3: Strip the junk (script)
 
-```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/legit-pdf2md/scripts/clean_gdoc_md.py" strip export.md -o clean.md
-```
+One workbench cell: download the export link to `export.md` and the script to `clean_gdoc_md.py`, run
+`subprocess.run([sys.executable, "clean_gdoc_md.py", "strip", "export.md", "-o", "clean.md"], capture_output=True, text=True)`,
+then print the script's JSON output and the contents of `clean.md`. The stripped text is small; it is what Step 4 edits.
 
-`${CLAUDE_PLUGIN_ROOT}` is set for an installed plugin. If it is empty (the skill was copied in by
-hand, or the shell does not expand it), use `scripts/clean_gdoc_md.py` inside the directory this skill was loaded from (that directory already ends in `skills/legit-pdf2md`), or find
-the file once with `find ~/.claude -name clean_gdoc_md.py` and use that absolute path for both this
-step and Step 5. Never fall back to cleaning the Markdown by hand: the script and its check are what
-make the wording guarantee true.
+**On the CLI**, write the cell to a JSON file as `{"code_to_execute": "..."}` and run `composio execute COMPOSIO_REMOTE_WORKBENCH -d @<file>`. With the CLI inside WSL, pass the WSL path: `-d @$(wslpath -u '<windows path>')`.
 
-**In the chat app** there is no `${CLAUDE_PLUGIN_ROOT}`. Run Steps 3 and 5 where option 2 or 3 above puts them.
+**If the workbench fails**, say so and stop. Never clean the Markdown by hand: the script and its check are what make the wording guarantee true.
 
-`python3` is the name that exists on macOS and most Linux boxes. **On Windows, use `py -3`.** There,
-`python` and `python3` are often Microsoft Store shortcuts that print "Python was not found" and
-run nothing; that means Python is missing, not that the script is broken. If `py` is not found either,
-try `python` once, then tell the user to install Python from python.org.
-Use whichever the shell answers to, the same one for Step 5. The script needs nothing but the
-standard library, any version from 3.8 up.
+**Local-file route** (the user handed you a `.md`, so there is no export link): the workbench cannot see a local file, so run the same two commands with this session's own Python instead: the chat app's code execution, or `python3` (`py -3` on Windows) on the script in this skill's `scripts/` folder.
 
 It works outside fenced code blocks only; code blocks (including ones inside quotes and lists) and inline code are never touched. It removes base64 images (leaving `[image N]` placeholders), `&nbsp;` and other entities, broken characters, Google's backslash escapes, the code-font backticks the Drive API export wraps around letter-spaced text and bare step numbers, asterisks that OCR scatters between letters, trailing spaces and extra blank lines. It never changes wording. It prints JSON with `stats` and a `worklist`.
 
 ## Step 4: Rebuild the structure (judgment)
 
-A script cannot do this part, because the export has lost information that only reading can restore. Start from the worklist: it names the lines that need attention. If you see the same pattern on a line it missed, fix that too. Make targeted edits by line; retyping the whole document costs far more and is where wording drifts.
+A script cannot do this part, because the export has lost information that only reading can restore. Start from the worklist: it names the lines that need attention. If you see the same pattern on a line it missed, fix that too. Make targeted edits by line to your copy of the printed text; retyping the whole document costs far more and is where wording drifts.
 
 **Letter-spaced text** (`letter_spaced`). Display type from a designed PDF comes out as single letters: `S T A R T W H E R E Y O U A R E`, or a short `W H Y`. The spaces between words are gone, so read it and rejoin it: `Start where you are`.
 - Part and section titles become `##`, sub-labels `###` or bold. Give the document title `#` even if a part label happens to come before it.
@@ -132,9 +121,7 @@ A script cannot do this part, because the export has lost information that only 
 
 ## Step 5: Check the wording
 
-```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/legit-pdf2md/scripts/clean_gdoc_md.py" check export.md clean.md
-```
+A second self-contained workbench cell: download the export link and the script again, write your rebuilt text to `clean.md` (put it in the cell as a JSON string literal, so quotes and backslashes survive), run `check export.md clean.md` the same way, and print the result and the exit code.
 
 It compares wording word by word, in any language, ignoring spacing, case, Markdown, code-fence lines and removed junk. It does not compare punctuation, which is why Step 3 never touches code. Exit code 1 means it failed.
 
