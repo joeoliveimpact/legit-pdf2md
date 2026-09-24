@@ -39,6 +39,9 @@ Parameter casing differs between these tools; when a call fails validation, read
 - Autofix can join lines inside a multi-line inline code span (letters unchanged). Dropping every letter of an inline code span leaves empty backticks.
 - `kept_in_code` (informational) can differ between runs on the same export; the image verdict never does.
 
+**Scanned PDFs**
+- OCR text is looser: page navigation and a handle split across words (`@JOEOLIVE IMPACT`) may not be flagged, so they can stay; a list can fall across two blocks and not be rebuildable as one; a step whose text OCR missed leaves only its number (drop it with a reason). Screenshot text is read as words. Report what was left.
+
 **Numbered lists** (the AI confirms them; autofix never builds one)
 - A suggested list can be wrong while every letter stays in order: real trailing numbers read as steps (`final score: 1 / 2 / 3`), numbers placed before their items (shifts every item by one), a broken run (1, 1, 2) merging the next line into item 1. The check passes all of these, which is why SKILL.md says to check each suggestion against the text.
 - An AI can still move a real trailing number (`Chapter 3. 4`) into list position.

@@ -268,6 +268,12 @@ def detached_number_lists_go_to_the_ai(m):
         for row in x["text"].split("\n"):
             n, _, line = row.partition("| ")
             assert L[int(n) - 1] == line and x["lines"][0] <= int(n) <= x["lines"][1], (row, x["lines"])
+        rows = [int(r.partition("| ")[0]) for r in x["text"].split("\n")]   # blank lines shown too: no gaps
+        assert rows == list(range(x["lines"][0], x["lines"][1] + 1)), (rows, x["lines"])
+        for side in ("before", "after"):   # the whole neighbouring line, with its number: an edit may cover it
+            if x[side]:
+                n, _, line = x[side].partition("| ")
+                assert L[int(n) - 1] == line and line.strip() and not x["lines"][0] <= int(n) <= x["lines"][1], (side, x)
     blk = [x for x in r["issues"] if "suggested_list" in x]
     assert len(blk) == 1 and "number_list" in r["ops_by_type"]["number_list"], blk
     assert blk[0]["suggested_list"][0]["text"].startswith("1. Make a free account. It takes a minute.\n2. Connect"), blk

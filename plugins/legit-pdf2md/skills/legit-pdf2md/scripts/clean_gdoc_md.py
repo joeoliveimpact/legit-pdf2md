@@ -775,7 +775,7 @@ def analyze(text, nav_openings=()):
         taken.update(range(a, b + 1))
         p, n = ctx(a, -1), ctx(b, 1)
         issues.append({"type": kind, "lines": [a + 1, b + 1], "text": "\n".join(lines[a:b + 1]),
-                       "before": lines[p][:120] if p is not None else "", "after": lines[n][:120] if n is not None else "",
+                       "before": f"{p + 1}| {lines[p]}" if p is not None else "", "after": f"{n + 1}| {lines[n]}" if n is not None else "",
                        "context_lines": [p + 1 if p is not None else a + 1, n + 1 if n is not None else b + 1],
                        "confidence": conf, "safe_autofix": safe, "ops": HOST_OPS.get(kind, []), **({"fix": fix} if fix else {}),
                        **extra})
@@ -937,17 +937,15 @@ def _group(issues, text):
                 if k in x:
                     b.setdefault(k, []).append(x[k])
         else:
-            blocks.append({"types": [x["type"]], "lines": list(x["lines"]), "before": x["before"][:50],
+            blocks.append({"types": [x["type"]], "lines": list(x["lines"]), "before": x["before"],
                            "after": x["after"], "ops": list(x["ops"]), "context_lines": list(x["context_lines"]),
                            "flagged": list(range(x["lines"][0], x["lines"][1] + 1)),
                            "movable": list(range(x["lines"][0], x["lines"][1] + 1)) if "move_heading" in x["ops"] else [],
                            "safe_autofix": False, **{k: [x[k]] for k in ("suggested_drop", "suggested_list") if k in x}})
     for n, b in enumerate(blocks, 1):
         b["id"] = f"b{n}"
-        b["after"] = b["after"][:50]
-        # each line with its number ("171| text"), so the AI can name exact lines; blank lines are left out
-        b["text"] = "\n".join(f"{n}| {l}" for n, l in enumerate(lines[b["lines"][0] - 1:b["lines"][1]], b["lines"][0])
-                              if l.strip())
+        # every line with its number ("171| text"), blank ones too, so the AI can name exact lines
+        b["text"] = "\n".join(f"{n}| {l}" for n, l in enumerate(lines[b["lines"][0] - 1:b["lines"][1]], b["lines"][0]))
     return blocks
 
 

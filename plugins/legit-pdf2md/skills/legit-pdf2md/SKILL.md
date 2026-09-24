@@ -20,7 +20,7 @@ Done means all five:
 
 ## Why this matters
 
-Google's own Markdown export is the cheapest way to get text out of a PDF, and the only one here that reads scanned pages. But the file is mostly junk: a real 12-page guide exported at about 19,400 tokens, 78% of it pictures stored as base64 text, and cleans to about 3,700. The person is trying to stop their AI forgetting their documents, so the cleanup must never quietly change what the document says. A script does everything that is certain, you (the AI) decide only what needs reading, and a check proves nothing was lost.
+Google's own Markdown export is the cheapest way to get text out of a PDF, and the only one here that reads scanned pages. But the file is mostly junk: a real 12-page guide exported at about 19,400 tokens, 78% of it pictures stored as base64 text, and cleans to about 3,700. (A scanned PDF exports no pictures, so it starts far smaller and the saving is smaller.) The person is trying to stop their AI forgetting their documents, so the cleanup must never quietly change what the document says. A script does everything that is certain, you (the AI) decide only what needs reading, and a check proves nothing was lost.
 
 ## How the work is split
 
@@ -45,7 +45,7 @@ Use only Composio for Drive. If the app also has its own Google Drive integratio
 
 ## Step 1: Find the file
 
-- The file ID is the part of the link after `/d/`, or search by name with `GOOGLEDRIVE_FIND_FILE`.
+- The file ID is the part of the link after `/d/`, or search by name with `GOOGLEDRIVE_FIND_FILE`. On the connector the start cell reads the metadata itself: call it yourself only to find the file or the account.
 - Metadata must ask for the fields by name, or `parents` silently goes missing: `{"fileId": "<id>", "fields": "id,name,mimeType,parents,driveId,modifiedTime", "supportsAllDrives": true}`. The parent folder is the only thing that puts the clean file back beside its source.
 - **404 "File not found"**: call `GOOGLEDRIVE_GET_ABOUT` before doubting the ID. The connection is often signed in to a different Google account than the one that owns the file, and Drive answers a wrong account with the same 404 as a wrong ID. With several ACTIVE accounts, try the others; otherwise tell the user which account the connection uses. Once one account finds the file, use only that account for the whole run.
 
@@ -54,10 +54,10 @@ Use only Composio for Drive. If the app also has its own Google Drive integratio
 A PDF is first copied to a temporary Google Doc in the user's private **My Drive root** (never the shared folder, which may carry a public link), with the document's OCR language (`en` unless it is in another language). That copy is where Google reads scanned pages. **On the connector, `drive_txn.py` makes this copy in the start cell: never make it yourself**, or it is a second copy nobody trashes. On the CLI you make it. Either way, write its id into your reply at once. The Doc (or the temporary copy) is exported as `text/markdown`, and the export goes straight into the workbench: its download link expires in an hour, and the raw export (the expensive part) never enters the conversation.
 
 Then, in the workbench: `clean_gdoc_md.py pipeline export.md --state state.json`. It prints compact JSON:
-- `status: needs_host_edits` with a packet: `rev`, `ops_by_type`, and `issues`, a list of blocks. Each block has an `id` (`b3`), `types`, its `lines`, its `text` with every line numbered (`171| Make a free account.`), the lines just `before` and `after` it, and sometimes `suggested_drop` or `suggested_list` (both are lists). Go to Step 3.
+- `status: needs_host_edits` with a packet: `rev`, `ops_by_type`, and `issues`, a list of blocks. Each block has an `id` (`b3`), `types`, its `lines`, its `text` with every line numbered (`171| Make a free account.`), the whole lines just `before` and `after` it (with their numbers), and sometimes `suggested_drop` or `suggested_list` (both are lists). Go to Step 3.
 - No issues left: it runs the final check itself. Go to Step 4.
 
-The runtime file has the exact cells. **Local route** (the user handed you an exported `.md`, no Composio): run the same commands with this session's own Python (`python3`; `py -3` on Windows, where `python` is often a Microsoft Store shortcut that prints "Python was not found") and the script in this skill's `scripts/` folder (inside the directory this skill was loaded from), keeping the state and edits files in a temporary folder. No Python anywhere: say so and stop. Save the result beside the user's file (in a chat app, where it offers the user downloads) as `clean_name(<file name>, "text/markdown")`, never over an existing file (take `(2)`, then `(3)`), and check the saved file's sha256 equals `clean_sha256`.
+The runtime files have the exact cells for Drive. **Local route** (the user handed you an exported `.md`, no Composio): run the same commands with this session's own Python (`python3`; `py -3` on Windows, where `python` is often a Microsoft Store shortcut that prints "Python was not found") and the script in this skill's `scripts/` folder (inside the directory this skill was loaded from), keeping the state and edits files in a temporary folder. No Python anywhere: say so and stop. Save the result beside the user's file (in a chat app, where it offers the user downloads) named by Step 5's rule (`Guide.md` → `Guide - clean.md`), never over an existing file (take `(2)`, then `(3)`), and check the saved file's sha256 equals `clean_sha256`.
 
 ## Step 3: Write the edits (judgment)
 
@@ -93,7 +93,7 @@ An edit may cover a block's lines plus the line either side; deletions (`delete`
 ## Step 4: The final check
 
 `clean_gdoc_md.py pipeline export.md --state state.json --final -o clean.md` (it writes `clean.md` only when validated). Always validate this way, never with the older standalone `check`: a correctly moved heading can fail that one.
-- `validated`: go to Step 5. `left_for_review` counts blocks you chose to leave; that is allowed. Read `deleted` (every removal, with its reason): anything there that is real content, put back before saving.
+- `validated`: go to Step 5 (on the connector, after this read, with `SAVE = True`). `left_for_review` counts blocks you chose to leave; that is allowed. Read `deleted` (every removal, with its reason): anything there that is real content, put back before saving.
 - `needs_review`: `unexplained_drops` lists text that was removed without a logged reason. Put it back or log it (`drops`/`delete` with a reason), then run the final check again. The file is not saved until this passes.
 - `failed`: read `check`. `added_runs` is text the source never had; `partial_word_drops` cut into a word; `merged_words` joined two words ("now here" became "nowhere"; rejoining letter-spaced type is not a merge, even with OCR chunks like `P A S TE`, so if a rejoined heading is listed, its first or last piece is an ordinary word: keep that word separate); `images` must show `ok: true` (every picture present, in order, none invented). Fix with more edits and check again. `moved_runs` and `split_words` do not fail it; mention moved text in the report.
 
@@ -111,7 +111,7 @@ Keep it short:
 - Tokens before and after (`tokens`), the automatic fixes (`autofixed`), and how many edits you made.
 - The check result: validated.
 - **What could not be recovered**, every time: link addresses (only link text survives Google's export), pictures listed under `kept_in_code`, scrambled spots you left in place, blocks you left for review, and whether a temporary Doc was made and trashed.
-- Where the file went (the link, or the local path, and the fallback if one was used), and: "Start a new chat and add this file instead of the PDF."
+- Where the file went (the link, or the local path, and the fallback if one was used), and: "Start a new chat and add this file instead of the original."
 
 ## References
 
