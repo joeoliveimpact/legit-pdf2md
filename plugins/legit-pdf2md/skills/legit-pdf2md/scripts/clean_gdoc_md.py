@@ -14,7 +14,7 @@ between letters, trailing spaces, and extra blank lines. Fenced code blocks (als
 and lists) and inline code are left untouched, except inline code holding nothing but images. Each image placeholder gets its own
 line, except inside list items, headings, quotes and tables. The worklist names the lines that need judgment.
 """
-__version__ = "0.1.4"
+__version__ = "0.2.0"
 
 import argparse, bisect, collections, difflib, hashlib, html, json, os, re, secrets, subprocess, sys, tempfile, unicodedata
 

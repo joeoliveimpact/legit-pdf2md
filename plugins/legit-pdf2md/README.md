@@ -64,24 +64,28 @@ So the five minutes is not the price of this skill. It is the last time you set 
 
 ## What you get back
 
-A new file, `<your document> - clean.md`, in the **same Drive folder** as the original, plus a short report: tokens before and after, what was fixed, and what could not be recovered.
+A new file, `<your document> - clean.md`, in the **same Drive folder** as the original, plus a short report: tokens before and after, what was fixed, and what could not be recovered. Before the report, the skill downloads the saved file again and checks it is exactly the text that passed the check.
+
+Run it again on the same file and nothing is redone: it hands you the clean file it already made. If the PDF has changed since, you get `<your document> - clean (2).md` next to the first one. It never overwrites.
 
 Then start a new chat and add the clean file. That is the whole point.
 
 ## What it will not do
 
-**It never changes your wording.** Not a rephrase, not a correction, not a "better" heading. After cleaning, it runs a check that compares the result against the source and fails if anything was invented, cut or merged. Headings, spacing and structure are restored by reading the document; the words are yours.
+**It never changes your wording.** Not a rephrase, not a correction, not a "better" heading. After cleaning, it runs a check that compares the result against the source letter by letter and fails if anything was invented or merged, or a picture went missing. Every deletion (page headers, footers, repeated handles) is logged with its reason, and anything removed without one blocks the save. Headings, spacing and structure are restored by reading the document; the words are yours.
 
 Some things a PDF cannot give back, and it tells you when that happens:
 
 - **Images become `[image N]` placeholders.** The picture is gone from the text; the position is kept.
+- **Links keep their text, not their address.** Google's export drops where a link pointed.
 - **Scans depend on the OCR.** Google reads them well, but a bad scan is still a bad scan.
 - **Complex tables and multi-column layouts** come through as best it can and are worth a look.
 
 ## Under the hood
 
-- `SKILL.md` - the procedure Claude follows, including how it finds your connection.
-- `skills/legit-pdf2md/scripts/clean_gdoc_md.py` - the cleaner. **Standard library only**: no network, no API key, no dependencies. `strip` removes the junk, `check` proves the wording survived, `selftest` proves both work.
+- `SKILL.md` - the procedure the AI follows, including how it finds your connection, plus `references/` for each way of running it.
+- `skills/legit-pdf2md/scripts/clean_gdoc_md.py` - the cleaner. **Standard library only**: no network, no API key, no dependencies. `pipeline` removes the junk, makes every fix that cannot change a word, and hands the AI only the lines that need judgment; `apply-edits` takes the AI's fixes and refuses any that would change a word; `pipeline --final` proves the wording and every picture survived; `selftest` proves it all works.
+- `skills/legit-pdf2md/scripts/drive_txn.py` - the Drive side, run inside Composio: saves beside the source, reads the file back, and only then trashes the temporary Doc it made.
 
 ```bash
 python3 clean_gdoc_md.py selftest

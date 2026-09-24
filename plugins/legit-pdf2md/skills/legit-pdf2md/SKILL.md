@@ -5,7 +5,7 @@ description: Turn a Google Doc, or a PDF stored in Google Drive (including scann
 
 # Google Doc or Drive PDF to clean Markdown
 
-This is version 0.1.4 of the skill.
+This is version 0.2.0 of the skill.
 
 ## Output contract
 
