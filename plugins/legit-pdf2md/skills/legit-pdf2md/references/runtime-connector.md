@@ -34,12 +34,13 @@ txn = drive_txn.Txn(run_composio_tool, ACCOUNT, FILE)
 src = txn.open()
 hit = txn.reusable(clean_gdoc_md.clean_name(src["name"], src["mimeType"]))
 if hit:   # this exact version of the source was cleaned before: nothing to do
-    print("REUSED", json.dumps(hit)); raise SystemExit
-txn.export(f"{W}/export-{FILE}.md", OCR)
-print(json.dumps({"name": src["name"], "mimeType": src["mimeType"], "TEMP_DOC": txn.j.get("temp_doc")}))
-r = subprocess.run([sys.executable, f"{W}/clean_gdoc_md.py", "pipeline", f"{W}/export-{FILE}.md",
-                    "--state", f"{W}/state-{FILE}.json"], capture_output=True, text=True)
-print(r.stdout or r.stderr)
+    print("REUSED", json.dumps(hit))
+else:
+    txn.export(f"{W}/export-{FILE}.md", OCR)
+    print(json.dumps({"name": src["name"], "mimeType": src["mimeType"], "TEMP_DOC": txn.j.get("temp_doc")}))
+    r = subprocess.run([sys.executable, f"{W}/clean_gdoc_md.py", "pipeline", f"{W}/export-{FILE}.md",
+                        "--state", f"{W}/state-{FILE}.json"], capture_output=True, text=True)
+    print(r.stdout or r.stderr)
 ```
 
 If it prints `REUSED`, this skill already cleaned this exact version of the file (the clean file's Drive description carries the source's id and last-modified time): report that file and its link, and stop. No temporary Doc was made.
@@ -73,23 +74,25 @@ if os.path.exists(STATE):
 def run(*a):
     p = subprocess.run([sys.executable, f"{W}/clean_gdoc_md.py", *a], capture_output=True, text=True)
     if not p.stdout:
-        print(p.stderr); raise SystemExit
+        raise RuntimeError(p.stderr[-2000:])   # the script crashed: a real error
     return json.loads(p.stdout)
-out = run("pipeline", EXPORT, "--state", STATE)
-for b in BATCHES:
-    json.dump(b, open(f"{W}/edits.json", "w", encoding="utf-8"), ensure_ascii=False)
-    out = run("apply-edits", f"{W}/edits.json", "--state", STATE)
-    if not out["applied"]:
-        break
-if not FINAL or not out.get("applied", True):
-    print(json.dumps(out, ensure_ascii=False)); raise SystemExit   # errors, or the next packet
-r = run("pipeline", EXPORT, "--state", STATE, "--final", "-o", CLEAN)
-print(json.dumps({k: r.get(k) for k in ("status", "error", "tokens", "autofixed", "left_for_review",
-                                         "unexplained_drops", "deleted", "check")}, ensure_ascii=False))
-if r["status"] == "validated":
-    text = open(CLEAN, encoding="utf-8").read()
-    print(txn.save(text, r["clean_sha256"], clean_gdoc_md.clean_name(src["name"], src["mimeType"])))
-    print(txn.cleanup())
+def main():   # plain returns: a stopped cell must not read as a failed one
+    out = run("pipeline", EXPORT, "--state", STATE)
+    for b in BATCHES:
+        json.dump(b, open(f"{W}/edits.json", "w", encoding="utf-8"), ensure_ascii=False)
+        out = run("apply-edits", f"{W}/edits.json", "--state", STATE)
+        if not out["applied"]:
+            break
+    if not FINAL or not out.get("applied", True):
+        return print(json.dumps(out, ensure_ascii=False))   # errors, or the next packet
+    r = run("pipeline", EXPORT, "--state", STATE, "--final", "-o", CLEAN)
+    print(json.dumps({k: r.get(k) for k in ("status", "error", "tokens", "autofixed", "left_for_review",
+                                             "unexplained_drops", "deleted", "check")}, ensure_ascii=False))
+    if r["status"] == "validated":
+        text = open(CLEAN, encoding="utf-8").read()
+        print(txn.save(text, r["clean_sha256"], clean_gdoc_md.clean_name(src["name"], src["mimeType"])))
+        print(txn.cleanup())
+main()
 ```
 
 - With `FINAL = False` the cell prints the newest packet (new `rev`, new line numbers) for your next batch. A refused batch prints its errors and the packet for the text before it: fix that batch and run again.

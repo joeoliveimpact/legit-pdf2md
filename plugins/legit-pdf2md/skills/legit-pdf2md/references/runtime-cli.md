@@ -56,21 +56,23 @@ for url, path in ((BASE + "clean_gdoc_md.py", "clean_gdoc_md.py"), (EXPORT, "exp
 def run(*a):
     p = subprocess.run([sys.executable, "clean_gdoc_md.py", *a], capture_output=True, text=True)
     if not p.stdout:
-        print(p.stderr); raise SystemExit
+        raise RuntimeError(p.stderr[-2000:])   # the script crashed: a real error
     return json.loads(p.stdout)
-run("pipeline", "export.md", "--state", "state.json")
-for b in BATCHES:
-    json.dump(b, open("edits.json", "w", encoding="utf-8"), ensure_ascii=False)
-    out = run("apply-edits", "edits.json", "--state", "state.json")
-    if not out["applied"] or not FINAL and b is BATCHES[-1]:
-        print(json.dumps(out, ensure_ascii=False)); raise SystemExit   # errors, or the next packet
-r = run("pipeline", "export.md", "--state", "state.json", "--final", "-o", "clean.md")
-print(json.dumps({k: r.get(k) for k in ("status", "error", "clean_sha256", "tokens", "autofixed", "left_for_review",
-                                         "unexplained_drops", "deleted", "check")}, ensure_ascii=False))
-if r["status"] == "validated":
-    from clean_gdoc_md import clean_name
-    print("SAVE_JSON " + json.dumps({"file_name": clean_name(TITLE, MIME), "text_content": open("clean.md", encoding="utf-8").read(),
-                                     "mime_type": "text/markdown", "parent_id": PARENT}, ensure_ascii=False))
+def main():   # plain returns: a stopped cell must not read as a failed one
+    run("pipeline", "export.md", "--state", "state.json")
+    for b in BATCHES:
+        json.dump(b, open("edits.json", "w", encoding="utf-8"), ensure_ascii=False)
+        out = run("apply-edits", "edits.json", "--state", "state.json")
+        if not out["applied"] or not FINAL and b is BATCHES[-1]:
+            return print(json.dumps(out, ensure_ascii=False))   # errors, or the next packet
+    r = run("pipeline", "export.md", "--state", "state.json", "--final", "-o", "clean.md")
+    print(json.dumps({k: r.get(k) for k in ("status", "error", "clean_sha256", "tokens", "autofixed", "left_for_review",
+                                             "unexplained_drops", "deleted", "check")}, ensure_ascii=False))
+    if r["status"] == "validated":
+        from clean_gdoc_md import clean_name
+        print("SAVE_JSON " + json.dumps({"file_name": clean_name(TITLE, MIME), "text_content": open("clean.md", encoding="utf-8").read(),
+                                         "mime_type": "text/markdown", "parent_id": PARENT}, ensure_ascii=False))
+main()
 ```
 
 With `FINAL = False` the cell prints the newest packet (new `rev`, new line numbers) for your next batch. If a batch is refused, it prints the errors and the packet for the text before that batch: fix the batch and run again. Set `FINAL = True` when you are done editing.
