@@ -158,12 +158,12 @@ class Txn:
                              f"version. Run the start cell again for the current version; {doc} is left in My "
                              f"Drive for the user to trash")
 
-    def _temps(self):
+    def temps(self):
         """This version's temporary Docs in My Drive root, found by their stamp (the id was lost). Extra ones, and
         ones from older versions of the source, go to leftovers for the report; nothing here is trashed."""
         name, stamp = temp_name(self.j["source"]["name"]), self.temp_stamp()
         found = self._run("GOOGLEDRIVE_FIND_FILE", {"q": f"name = '{_q(name)}' and 'root' in parents and "
-                          f"mimeType = '{DOC}' and trashed = false", "fields": "files(id,name,description)"})
+                          f"mimeType = '{DOC}' and trashed = false", "fields": "files(id,name,description)", "pageSize": 1000})
         ours = [f for f in found.get("files") or [] if (f.get("description") or "").startswith(self.temp_stamp(any_version=True))]
         mine = [f["id"] for f in ours if f["description"] == stamp]
         extra = mine[1:] + [f["id"] for f in ours if f["description"] != stamp]
@@ -181,7 +181,7 @@ class Txn:
         doc = src["id"]
         if src["mimeType"] != DOC:
             if not self.j.get("temp_doc"):
-                found = self._temps()
+                found = self.temps()
                 if found:
                     self.j["temp_doc"] = found[0]
                 elif not copy:
@@ -294,7 +294,8 @@ class Txn:
         """Files in folder named name, or name with a " (N)" before .md."""
         stem = name[:-3] if name.endswith(".md") else name
         found = self._run("GOOGLEDRIVE_FIND_FILE", {"q": f"name contains '{_q(stem)}' and '{folder}' in parents and trashed = false",
-                          "fields": "files(id,name,description)", "supportsAllDrives": True, "includeItemsFromAllDrives": True})
+                          "fields": "files(id,name,description)", "pageSize": 1000, "supportsAllDrives": True,
+                          "includeItemsFromAllDrives": True})
         pat = re.compile(re.escape(stem) + r"( \(\d+\))?\.md")
         return [f for f in found.get("files") or [] if pat.fullmatch(f.get("name", ""))]
 

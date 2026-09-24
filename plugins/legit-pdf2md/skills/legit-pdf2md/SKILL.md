@@ -57,7 +57,7 @@ Then, in the workbench: `clean_gdoc_md.py pipeline export.md --state state.json`
 - `status: needs_host_edits` with a packet: `rev`, `ops_by_type`, and `issues`, a list of blocks. Each block has an `id` (`b3`), `types`, its `lines`, its `text` with every line numbered (`171| Make a free account.`), the lines just `before` and `after` it, and sometimes `suggested_drop` or `suggested_list` (both are lists). Go to Step 3.
 - No issues left: it runs the final check itself. Go to Step 4.
 
-The runtime file has the exact cells. **Local route** (the user handed you an exported `.md`, no Composio): run the same commands with this session's own Python (`python3`; `py -3` on Windows, where `python` is often a Microsoft Store shortcut that prints "Python was not found") and the script in this skill's `scripts/` folder (inside the directory this skill was loaded from), keeping the state and edits files in a temporary folder. No Python anywhere: say so and stop. Save the result beside the user's file as `clean_name(<file name>, "text/markdown")`, never over an existing file (take `(2)`, then `(3)`), and check the saved file's sha256 equals `clean_sha256`.
+The runtime file has the exact cells. **Local route** (the user handed you an exported `.md`, no Composio): run the same commands with this session's own Python (`python3`; `py -3` on Windows, where `python` is often a Microsoft Store shortcut that prints "Python was not found") and the script in this skill's `scripts/` folder (inside the directory this skill was loaded from), keeping the state and edits files in a temporary folder. No Python anywhere: say so and stop. Save the result beside the user's file (in a chat app, where it offers the user downloads) as `clean_name(<file name>, "text/markdown")`, never over an existing file (take `(2)`, then `(3)`), and check the saved file's sha256 equals `clean_sha256`.
 
 ## Step 3: Write the edits (judgment)
 
@@ -115,7 +115,7 @@ Keep it short:
 
 ## References
 
-In the `references/` folder next to this file. This file's own link is `https://raw.githubusercontent.com/joeoliveimpact/legit-pdf2md/v0.2.0/plugins/legit-pdf2md/skills/legit-pdf2md/SKILL.md`; replace `SKILL.md` at its end with `references/<name>`:
+In the `references/` folder next to this file. This file's own link is `https://raw.githubusercontent.com/joeoliveimpact/legit-pdf2md/v0.2.0/plugins/legit-pdf2md/skills/legit-pdf2md/SKILL.md`; replace `SKILL.md` at its end with `references/<name>`. If your own fetch cannot open a link and no GitHub connector can read it, fetch it in `COMPOSIO_REMOTE_WORKBENCH` and read the output: `import requests; print(requests.get("<link>", timeout=60).text)`.
 - `references/runtime-connector.md`: the connector path (Claude chat, Cowork, Code, ChatGPT), cell by cell.
 - `references/runtime-cli.md`: the CLI path, including Windows with the CLI inside WSL.
 - `references/tools-and-limits.md`: every Composio tool with its parameter-casing traps, and the known limits of the script and the check. Open it when a call fails validation or a result is not explained above.

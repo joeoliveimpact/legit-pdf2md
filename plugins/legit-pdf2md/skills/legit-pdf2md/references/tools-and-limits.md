@@ -45,7 +45,7 @@ Parameter casing differs between these tools; when a call fails validation, read
 
 **Drive**
 - Composio can replace its workbench sandbox between any two calls, with `/mnt/files` empty. A run survives it through what is kept in the chat (the temporary Doc id and the edit batches) and through the temporary Doc's description, stamped at copy time with the source's id and version, which lets a later cell find it again. A Drive search can lag a few seconds behind a new copy, so the id in the chat is still the direct record.
-- A run belongs to one version of the source (its last-modified time when the run started). Edited mid-run, the run stops and the start cell cleans the new version; temporary Docs from an older version are reported as `LEFTOVERS` and never trashed by the new run.
+- A run belongs to one version of the source (its last-modified time when the run started). A PDF edited mid-run stops the run on the connector and the start cell cleans the new version (on the CLI it is cleaned from the copy made before the edit and keyed to that older version, so the next run redoes it); a Google Doc source edited mid-run shows as a refused batch with a new `rev`; temporary Docs from an older version are reported as `LEFTOVERS` and never trashed by the new run.
 - The save tool takes no shared-drive flag. If Drive answers "not found" for a shared-drive folder the source sits in, the run stops and reports it rather than saving somewhere else.
 - The reuse key names the source's version, not the clean file's content: a keyed clean file the user edited afterwards is still the one a re-run returns.
 - Two runs on the same source file at the same moment in one sandbox share one journal. Run one at a time per file.

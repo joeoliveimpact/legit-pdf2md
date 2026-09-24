@@ -607,9 +607,12 @@ class FakeDrive:
     def __call__(self, slug, a, account=None):
         self.log.append((slug, a.get("fileId") or a.get("file_id") or a.get("file_name")))
         f = self.files.get(a.get("fileId") or a.get("file_id"), {})
-        if slug == "GOOGLEDRIVE_GET_FILE_METADATA":
-            return ({"data": {k: v for k, v in f.items() if k not in ("body", "pdf_text")}}, "") if f else \
-                ({"data": None}, "404 File not found")
+        if slug == "GOOGLEDRIVE_GET_FILE_METADATA":   # only the fields asked for, as Drive does
+            if not f:
+                return {"data": None}, "404 File not found"
+            want = a["fields"].split(",")
+            return {"data": {k: f.get(k, False if k == "trashed" else None) for k in want
+                             if k in f or k == "trashed"}}, ""
         if slug == "GOOGLEDRIVE_COPY_FILE_ADVANCED":
             self.copies += 1
             tid = f"tmp{self.copies}"
@@ -643,12 +646,13 @@ class FakeDrive:
             name, folder = (re.sub(r"\\(.)", r"\1", s) for s in (name, folder))
             if folder in self.shared and not (a.get("includeItemsFromAllDrives") and a.get("supportsAllDrives")):
                 return {"data": {"files": [], "kind": "drive#fileList"}}, ""
-            hits = [{"id": x["id"], "name": x["name"], **({"description": x["description"]} if "description" in x else {})}
+            want = re.fullmatch(r"files\(([^)]*)\)", a.get("fields", "files(id,name)")).group(1).split(",")
+            hits = [{k: x[k] for k in want if k in x}
                     for x in self.files.values()
                     if (x.get("name") == name if op == "=" else x.get("name", "").startswith(name))
                     and x.get("parent", (x.get("parents") or [None])[0]) == folder and not x.get("trashed")
                     and (mime is None or x.get("mimeType") == mime)]
-            return {"data": {"files": hits, "kind": "drive#fileList"}}, ""
+            return {"data": {"files": hits[:a.get("pageSize", 100)], "kind": "drive#fileList"}}, ""   # one page
         if slug == "GOOGLEDRIVE_UPDATE_FILE_PUT":
             if isinstance(self.key_error, Exception):
                 raise self.key_error
@@ -685,7 +689,9 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
             x.open()
             return x
         trashes = lambda: [i for s, i in fd.log if s == "GOOGLEDRIVE_TRASH_FILE"]
-        _refused(lambda: t.Txn(fd, "me", "src", journals=d).export(e), "used before open() checked the run")
+        for step in (lambda x: x.export(e), lambda x: x.save(text, ok, "Guide - clean.md"),
+                     lambda x: x.reusable("Guide - clean.md"), lambda x: x.cleanup()):
+            _refused(lambda: step(t.Txn(fd, "me", "src", journals=d)), "used before open() checked the run")
         x = mk("src")
         x.export(os.path.join(d, "export.md"))
         assert open(os.path.join(d, "export.md"), encoding="utf-8", newline="").read() == "Export.\r\n"   # as exported
@@ -720,6 +726,7 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
         assert "temp_doc" not in z.j and "saved" not in z.j and z.j["account"] == "other", z.j
         # nor test mode: a finished test-mode run leaves the next run free
         mk("doc", test_folder="fold").save(text, ok, "Notes - clean.md")
+        assert t.Txn(fd, None, "doc", journals=d).account is None, "a finished run's account leaks into the next"
         assert mk("doc", None).test_folder is None
         assert t.Txn(fd, "me", "src2", journals=d).j["temp_doc"] == "tmp2"   # a mid-run journal is kept
         # one run, one account: a later cell cannot switch it, and one that names none inherits it
@@ -770,6 +777,8 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
             {"id": s["id"], "name": "Notes - clean.md", "where": "My Drive root"}
         # a source Drive shows no folder for: root, and never called "beside the source"
         assert "no folder" in mk("orphan").save(text, ok, "Shared - clean.md")["where"]
+        fd = FakeDrive(create_error="400 Cannot add files to this folder")   # Drive's other wording for it
+        assert "no permission" in mk("doc", journals=d + "/cannot").save(text, ok, "Notes - clean.md")["where"]
         # test mode is kept in the journal: a later cell without it, or with another folder, cannot drop it
         fd = FakeDrive()
         mk("src2", test_folder="fold")
@@ -891,16 +900,21 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
                             "description": "my notes, do not touch"}
         s = mk("doc", journals=d + "/F5").save(text, ok, "Notes - clean.md")
         assert s["name"] == "Notes - clean (2).md" and fd.files["note"]["description"] == "my notes, do not touch", s
+        # nor is one keyed to another source: the reuse key names the source
+        fd = FakeDrive()
+        fd.files["kx"] = {"id": "kx", "name": "Notes - clean.md", "parent": "fold", "body": text,
+                          "description": "legit-pdf2md reuse: source elsewhere modified T1"}
+        assert mk("doc", journals=d + "/F5b").save(text, ok, "Notes - clean.md")["name"] == "Notes - clean (2).md"
         # names: a lookalike never counts ("... .md.bak"), "(10)" does, and quotes and backslashes are escaped
         fd = FakeDrive()
         fd.files["bak"] = {"id": "bak", "name": "Notes - clean.md.bak", "parent": "fold", "body": text}
         s = mk("doc", journals=d + "/bak").save(text, ok, "Notes - clean.md")
         assert s["id"] != "bak" and s["name"] == "Notes - clean.md", s
         fd = FakeDrive()
-        for n in range(1, 11):
+        for n in range(1, 121):   # past one default page of 100
             nm = "Notes - clean.md" if n == 1 else f"Notes - clean ({n}).md"
             fd.files[f"n{n}"] = {"id": f"n{n}", "name": nm, "parent": "fold", "body": f"# {n}\n"}
-        assert mk("doc", journals=d + "/ten").save(text, ok, "Notes - clean.md")["name"] == "Notes - clean (11).md"
+        assert mk("doc", journals=d + "/ten").save(text, ok, "Notes - clean.md")["name"] == "Notes - clean (121).md"
         fd = FakeDrive()
         fd.files["q"] = {"id": "q", "name": "O'Brien \\ notes", "mimeType": DOC, "parents": ["fold"]}
         fd.files["qc"] = {"id": "qc", "name": "O'Brien \\ notes - clean.md", "parent": "fold", "body": "# other\n"}
