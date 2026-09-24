@@ -585,6 +585,7 @@ class FakeDrive:
         self.log, self.urls, self.n, self.copies = [], {}, 0, 0
         self.create_error, self.corrupt, self.copy_id = create_error, corrupt_readback, copy_id
         self.export_error, self.no_link, self.trash_sticks = export_error, no_link, trash_sticks
+        self.key_error = None
 
     def _url(self, text):
         self.n += 1
@@ -622,12 +623,18 @@ class FakeDrive:
             f["trashed"] = self.trash_sticks
             return {"data": {"id": f["id"]}}, ""
         if slug == "GOOGLEDRIVE_FIND_FILE":
-            name, folder = re.match(r"name = '(.*)' and '(.*)' in parents and trashed = false$", a["q"]).groups()
+            op, name, folder = re.match(r"name (=|contains) '(.*)' and '(.*)' in parents and trashed = false$", a["q"]).groups()
             name = name.replace("\\'", "'").replace("\\\\", "\\")
-            hits = [{"id": x["id"], "name": x["name"]} for x in self.files.values()
-                    if x.get("name") == name and x.get("parent", (x.get("parents") or [None])[0]) == folder
-                    and not x.get("trashed")]
+            hits = [{"id": x["id"], "name": x["name"], **({"description": x["description"]} if "description" in x else {})}
+                    for x in self.files.values()
+                    if (x.get("name") == name if op == "=" else name in x.get("name", ""))
+                    and x.get("parent", (x.get("parents") or [None])[0]) == folder and not x.get("trashed")]
             return {"data": {"files": hits, "kind": "drive#fileList"}}, ""
+        if slug == "GOOGLEDRIVE_UPDATE_FILE_PUT":
+            if self.key_error:
+                return {"data": None}, self.key_error
+            f["description"] = a["description"]
+            return {"data": {"id": f["id"]}}, ""
         raise AssertionError(slug)
 
 
@@ -758,7 +765,45 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
         fd.files["prev"] = {"id": "prev", "name": "Notes - clean.md", "parent": "fold", "body": "# old\n"}
         w = t.Txn(fd, "me", "doc", journals=os.path.join(d, "reset", "h"), fetch=fd.urls.__getitem__)
         w.open()
-        assert w.save(text, ok, "Notes - clean.md")["id"] not in ("prev", None)
+        s = w.save(text, ok, "Notes - clean.md")
+        assert s["id"] not in ("prev", None) and s["name"] == "Notes - clean (2).md", s   # never overwrite
+        # D3: a re-run on the unchanged source finds the keyed clean file and does no work: no copy, no save
+        fd.files["src"]["modifiedTime"] = "T1"
+        r1 = mk2("r1")
+        r1.open()
+        r1.export(os.path.join(d, "e.md"))
+        s1 = r1.save(text, ok, "Guide - clean.md")
+        assert s1["reuse_key"] and fd.files[s1["id"]]["description"].endswith("modified T1"), s1
+        copies, saves = fd.copies, len(fd.created())
+        r2 = mk2("r2")
+        r2.open()
+        assert r2.reusable("Guide - clean.md") == {"id": s1["id"], "name": s1["name"], "where": "beside the source"}
+        assert fd.copies == copies and len(fd.created()) == saves
+        # the source changed: no reuse, and the new clean file is "(2)", the old one untouched
+        fd.files["src"]["modifiedTime"] = "T2"
+        r3 = mk2("r3")
+        r3.open()
+        assert r3.reusable("Guide - clean.md") is None
+        r3.export(os.path.join(d, "e.md"))
+        other = "# Guide\n\nChanged text.\n"
+        s3 = r3.save(other, t.sha(other), "Guide - clean.md")
+        assert s3["name"] == "Guide - clean (2).md" and fd.files[s1["id"]]["body"].startswith("# Guide\r\n\r\nClean"), s3
+        # the key cannot be set: the save still stands, and says so
+        fd.key_error = "500 backend error"
+        r4 = mk2("r4")
+        r4.open()
+        r4.export(os.path.join(d, "e.md"))
+        third = "# Guide\n\nThird text.\n"
+        s4 = r4.save(third, t.sha(third), "Guide - clean.md")
+        assert s4["reuse_key"] is False and r4.j["saved_ok"] and s4["name"] == "Guide - clean (3).md", s4
+        fd.key_error = None
+        # a lookalike file holding the same text ("... - clean copy.md") is never taken for this run's save
+        fd3 = FakeDrive()
+        fd3.files["cp"] = {"id": "cp", "name": "Notes - clean copy.md", "parent": "fold", "body": text}
+        v = t.Txn(fd3, "me", "doc", journals=os.path.join(d, "reset", "v"), fetch=fd3.urls.__getitem__)
+        v.open()
+        sv = v.save(text, ok, "Notes - clean.md")
+        assert sv["id"] != "cp" and sv["name"] == "Notes - clean.md", sv
         # the OCR language reaches the copy
         fd = FakeDrive()
         x = t.Txn(fd, "me", "src", journals=d + "/o", fetch=fd.urls.__getitem__)

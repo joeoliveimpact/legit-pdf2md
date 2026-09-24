@@ -21,7 +21,7 @@ python3 -c 'import json; o = json.load(open("out.json")); print(o["data"]["stdou
 
 ## Drive steps (outside the workbench)
 
-1. Metadata, with `fields` (SKILL.md Step 1). Keep `name`, `mimeType` and the first of `parents`.
+1. Metadata, with `fields` (SKILL.md Step 1). Keep `id`, `name`, `mimeType`, `modifiedTime` and the first of `parents`. The reuse key for this version of the file is `legit-pdf2md reuse: source <id> modified <modifiedTime>`. **Look for an earlier clean file first:** `GOOGLEDRIVE_FIND_FILE` with `q: "name contains '<title> - clean' and '<folder id>' in parents and trashed = false"` and `fields: "files(id,name,description)"`. If one has exactly the reuse key as its `description`, this version was already cleaned: report that file and stop, with no copy made.
 2. A PDF: `GOOGLEDRIVE_COPY_FILE_ADVANCED` with `fileId`, `mimeType: application/vnd.google-apps.document`, `ocrLanguage` (`en`, or the document's language), `supportsAllDrives: true`, `name: "<title> - temp"`, `parents: ["root"]`. **Write the returned id down in your reply** so it survives the session. If you ever lose it, do not guess: leave the Doc, and tell the user its name so they can trash it. A Google Doc source needs no copy.
 3. Export: `GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE` with `fileId` (the temporary Doc, or the source Doc) and `mimeType: text/markdown`. The download link is `data.file.s3url`; it expires in an hour. When it has, export again and start the edits over from cell A: a new export can differ.
 
@@ -79,8 +79,9 @@ With `FINAL = False` the cell prints the newest packet (new `rev`, new line numb
 
 1. **Never copy the document by hand.** Pull the payload out of cell B's output with a script:
    `python3 -c 'import json; s = json.load(open("out.json"))["data"]["stdout"]; l = [x for x in s.splitlines() if x.startswith("SAVE_JSON ")][0]; open("save.json", "w").write(l[10:])'`
-   then `composio execute GOOGLEDRIVE_CREATE_FILE_FROM_TEXT -d @save.json` (add `--account`). Keep the returned `data.id`. If the error says the account lacks **permission** to add files to the folder, remove `parent_id` from `save.json`, save again (My Drive root), and say so in the report. Any other error (rate limit, quota, not found): stop and report it; do not save somewhere else.
+   **Never overwrite:** if step 1's search showed a file already named `file_name`, change `file_name` in `save.json` to `<title> - clean (2).md` (or the next free number) with the same one-liner approach, never by retyping the text. Then `composio execute GOOGLEDRIVE_CREATE_FILE_FROM_TEXT -d @save.json` (add `--account`). Keep the returned `data.id`. If the error says the account lacks **permission** to add files to the folder, remove `parent_id` from `save.json`, save again (My Drive root), and say so in the report. Any other error (rate limit, quota, not found): stop and report it; do not save somewhere else.
 2. Read it back: `GOOGLEDRIVE_DOWNLOAD_FILE` with `fileId` = the saved id; the link is `data.downloaded_file_content.s3url`. Hash it the same way the script does:
    `python3 -c 'import hashlib, sys, urllib.request; print(hashlib.sha256(urllib.request.urlopen(sys.argv[1]).read().replace(b"\r\n", b"\n")).hexdigest())' "<link>"`
    It must equal `clean_sha256`. If it does not, stop: report the saved file's id, and keep the temporary Doc.
-3. Only after a match, and only for a PDF source: `GOOGLEDRIVE_TRASH_FILE` with `file_id` (snake case; this tool rejects `fileId`) = the temporary Doc id you wrote down, then `GOOGLEDRIVE_GET_FILE_METADATA` with `fields: "trashed"` must say `true`. Never trash anything else.
+3. Stamp the reuse key: `GOOGLEDRIVE_UPDATE_FILE_PUT` with `fileId` = the saved id and `description` = the reuse key from step 1. If it fails, the save still stands; say that next time's shortcut is lost.
+4. Only after a match, and only for a PDF source: `GOOGLEDRIVE_TRASH_FILE` with `file_id` (snake case; this tool rejects `fileId`) = the temporary Doc id you wrote down, then `GOOGLEDRIVE_GET_FILE_METADATA` with `fields: "trashed"` must say `true`. Never trash anything else.

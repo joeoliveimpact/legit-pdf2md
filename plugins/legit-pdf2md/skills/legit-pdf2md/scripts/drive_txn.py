@@ -20,6 +20,7 @@ import hashlib, json, os, re
 
 DOC = "application/vnd.google-apps.document"
 JOURNALS = "/mnt/files/legit-pdf2md"
+REUSE = "legit-pdf2md reuse:"   # the clean file's Drive description: the source id and modified time it came from
 
 
 class DriveError(Exception):
@@ -159,11 +160,18 @@ class Txn:
         parent = (self.j["source"].get("parents") or [None])[0]
         if self.test_folder and parent != self.test_folder:
             raise DriveError(f"test mode: the source is not in the test folder {self.test_folder}; not saved")
-        args = {"file_name": name, "text_content": text, "mime_type": "text/markdown"}
+        args = {"text_content": text, "mime_type": "text/markdown"}
 
-        def put(folder, extra):   # an identical file already there (a reset after the save) is this run's save
-            same = self._same_file(name, folder, clean_sha256)
-            return {"id": same, "reused": True} if same else self._run("GOOGLEDRIVE_CREATE_FILE_FROM_TEXT", {**args, **extra})
+        def put(folder, extra):
+            files = self._candidates(name, folder)
+            for f in files:   # an identical file already there (a reset after the save) is this run's save
+                if self._content_is(f["id"], clean_sha256):
+                    return {"id": f["id"], "name": f["name"], "reused": True}
+            taken, final, n = {f["name"] for f in files}, name, 2
+            while final in taken:   # never overwrite: another file has the name, so "<title> - clean (2).md"
+                final = f"{name[:-3]} ({n}).md"
+                n += 1
+            return {**self._run("GOOGLEDRIVE_CREATE_FILE_FROM_TEXT", {**args, "file_name": final, **extra}), "name": final}
         if parent:
             where = "beside the source"
             try:
@@ -178,31 +186,50 @@ class Txn:
             where = "My Drive root (Drive shows this account no folder for the source)"
         if not data.get("id"):
             raise DriveError("the save returned no file id; check Drive before running again")
-        self.j.update(saved={"id": data["id"], "name": name, "where": where, "sha256": clean_sha256}, saved_ok=False)
-        if data.get("reused"):   # already read back and matched by _same_file
-            self.j["saved_ok"] = True
-            self._save_journal()
-            return self.j["saved"]
+        self.j.update(saved={"id": data["id"], "name": data["name"], "where": where, "sha256": clean_sha256}, saved_ok=False)
         self._save_journal()
-        url = _find(self._run("GOOGLEDRIVE_DOWNLOAD_FILE", {"fileId": data["id"]}), "s3url")
-        if not url:
-            raise DriveError(f"read-back of {data['id']} returned no download link; the temporary Doc is kept")
-        if sha(self.fetch(url)) != clean_sha256:
-            raise DriveError(f"read-back of {data['id']} does not match the checked text; the temporary Doc is kept")
+        if not data.get("reused"):   # a reused file was already read back and matched by _content_is
+            url = _find(self._run("GOOGLEDRIVE_DOWNLOAD_FILE", {"fileId": data["id"]}), "s3url")
+            if not url:
+                raise DriveError(f"read-back of {data['id']} returned no download link; the temporary Doc is kept")
+            if sha(self.fetch(url)) != clean_sha256:
+                raise DriveError(f"read-back of {data['id']} does not match the checked text; the temporary Doc is kept")
         self.j["saved_ok"] = True
+        try:   # the reuse key: a later run on this unchanged source finds this file and does no work
+            self._run("GOOGLEDRIVE_UPDATE_FILE_PUT", {"fileId": data["id"], "description": self.reuse_key()})
+            self.j["saved"]["reuse_key"] = True
+        except DriveError:   # the save stands; only the shortcut for next time is lost
+            self.j["saved"]["reuse_key"] = False
         self._save_journal()
         return self.j["saved"]
 
-    def _same_file(self, name, folder, want):
-        """The id of a file in folder with this exact name whose content hashes to want, or None."""
-        esc = name.replace("\\", "\\\\").replace("'", "\\'")
-        found = self._run("GOOGLEDRIVE_FIND_FILE", {"q": f"name = '{esc}' and '{folder}' in parents and trashed = false",
-                          "fields": "files(id,name)", "supportsAllDrives": True, "includeItemsFromAllDrives": True})
-        for f in found.get("files") or []:
-            url = _find(self._run("GOOGLEDRIVE_DOWNLOAD_FILE", {"fileId": f["id"]}), "s3url")
-            if url and sha(self.fetch(url)) == want:
-                return f["id"]
+    def reuse_key(self):
+        src = self.j["source"]
+        return f"{REUSE} source {src['id']} modified {src.get('modifiedTime')}"
+
+    def reusable(self, name):
+        """A clean file this skill already made from this exact version of the source (same id and modified
+        time), found by the key in its description: {"id", "name", "where"}, or None. Call after open()."""
+        parent = (self.j["source"].get("parents") or [None])[0]
+        for folder, where in ((parent, "beside the source"), ("root", "My Drive root")):
+            if folder:
+                for f in self._candidates(name, folder):
+                    if f.get("description") == self.reuse_key():
+                        return {"id": f["id"], "name": f["name"], "where": where}
         return None
+
+    def _candidates(self, name, folder):
+        """Files in folder named name, or name with a " (N)" before .md."""
+        stem = name[:-3] if name.endswith(".md") else name
+        esc = stem.replace("\\", "\\\\").replace("'", "\\'")
+        found = self._run("GOOGLEDRIVE_FIND_FILE", {"q": f"name contains '{esc}' and '{folder}' in parents and trashed = false",
+                          "fields": "files(id,name,description)", "supportsAllDrives": True, "includeItemsFromAllDrives": True})
+        pat = re.compile(re.escape(stem) + r"( \(\d+\))?\.md")
+        return [f for f in found.get("files") or [] if pat.fullmatch(f.get("name", ""))]
+
+    def _content_is(self, file_id, want):
+        url = _find(self._run("GOOGLEDRIVE_DOWNLOAD_FILE", {"fileId": file_id}), "s3url")
+        return bool(url) and sha(self.fetch(url)) == want
 
     def cleanup(self):
         """Trash this run's temporary Doc, only after a verified save, and confirm it is trashed."""

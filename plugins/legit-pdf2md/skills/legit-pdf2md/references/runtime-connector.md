@@ -27,17 +27,22 @@ for f in ("clean_gdoc_md.py", "drive_txn.py"):
     got = requests.get(BASE + f, timeout=60); got.raise_for_status()
     open(f"{W}/{f}", "w", encoding="utf-8").write(got.text)
 sys.path.insert(0, W)
-import drive_txn
+import drive_txn, clean_gdoc_md
 about, err = run_composio_tool("GOOGLEDRIVE_GET_ABOUT", {}, account=ACCOUNT) if ACCOUNT else run_composio_tool("GOOGLEDRIVE_GET_ABOUT", {})
 print("signed in as:", json.dumps((about or {}).get("data", {}).get("user", {}).get("emailAddress")), err or "")
 txn = drive_txn.Txn(run_composio_tool, ACCOUNT, FILE)
 src = txn.open()
+hit = txn.reusable(clean_gdoc_md.clean_name(src["name"], src["mimeType"]))
+if hit:   # this exact version of the source was cleaned before: nothing to do
+    print("REUSED", json.dumps(hit)); raise SystemExit
 txn.export(f"{W}/export-{FILE}.md", OCR)
 print(json.dumps({"name": src["name"], "mimeType": src["mimeType"], "TEMP_DOC": txn.j.get("temp_doc")}))
 r = subprocess.run([sys.executable, f"{W}/clean_gdoc_md.py", "pipeline", f"{W}/export-{FILE}.md",
                     "--state", f"{W}/state-{FILE}.json"], capture_output=True, text=True)
 print(r.stdout or r.stderr)
 ```
+
+If it prints `REUSED`, this skill already cleaned this exact version of the file (the clean file's Drive description carries the source's id and last-modified time): report that file and its link, and stop. No temporary Doc was made.
 
 **Write `TEMP_DOC` into your reply straight away** (for a PDF; a Google Doc source has none). It is the only record of the temporary Doc that survives a sandbox reset, and it holds the document's full text until it is trashed. The rest of the output is the packet (SKILL.md Step 2).
 
@@ -88,7 +93,7 @@ if r["status"] == "validated":
 ```
 
 - With `FINAL = False` the cell prints the newest packet (new `rev`, new line numbers) for your next batch. A refused batch prints its errors and the packet for the text before it: fix that batch and run again.
-- `save` refuses text that is not the text the check passed, then saves beside the source, downloads it again and compares sha256. It returns where the file went: `beside the source`, or My Drive root with the reason (no permission to add files to the folder, or no folder visible to this account). Put that in the report. Before saving it looks for an identical file already in the folder, so running this cell again, even in a new sandbox, never saves twice.
+- `save` refuses text that is not the text the check passed, then saves beside the source, downloads it again and compares sha256. It returns where the file went: `beside the source`, or My Drive root with the reason (no permission to add files to the folder, or no folder visible to this account). Put that in the report. Before saving it looks for an identical file already in the folder, so running this cell again, even in a new sandbox, never saves twice. If another file already has the name, it saves `<title> - clean (2).md` (then `(3)`, and so on): it never overwrites. After the read-back matches, it writes the reuse key into the file's description (`reuse_key: true`); if Drive refuses that, the save still stands and only next time's shortcut is lost.
 - `cleanup` trashes only this run's temporary Doc, only after a verified save, and confirms Drive reports it trashed. For a Google Doc source there is nothing to trash.
 - Any `DriveError` stops with a plain reason; report it. "No temporary Doc id" means `TEMP` is missing: put back the id from the start cell. "Already trashed" means this run finished. A failed read-back names the saved file's id, and the temporary Doc stays.
 

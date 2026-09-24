@@ -10,7 +10,7 @@ This is version 0.1.4 of the skill.
 ## Output contract
 
 Done means all five:
-1. A new file `<original title> - clean.md` in the **same Drive folder** as the source (Step 5 has the naming rule and the one fallback). For a local `.md` the user handed you: `<file name> - clean.md` beside it.
+1. A new file `<original title> - clean.md` in the **same Drive folder** as the source (Step 5 has the naming rule, the one fallback, and re-runs: an unchanged source reuses its earlier clean file, and nothing is ever overwritten). For a local `.md` the user handed you: `<file name> - clean.md` beside it.
 2. The wording is the source's wording. Nothing reworded, summarized, corrected or added.
 3. `pipeline --final` returned `status: validated`.
 4. The saved file was read back and its sha256 equals the pipeline's `clean_sha256`, and only then was the temporary Doc (if one was made) trashed.
@@ -100,6 +100,8 @@ An edit may cover a block's lines plus the line either side; deletions (`delete`
 ## Step 5: Save, verify, clean up
 
 Name: `<original title> - clean.md`, where a PDF's title loses a trailing `.pdf` (any case) and nothing else is ever cut (`Guide.pdf` → `Guide - clean.md`; `Notes 09.11.26` → `Notes 09.11.26 - clean.md`). The script's `clean_name(title, mime_type)` applies this rule; use it rather than typing the name. A local `Guide.md` becomes `Guide - clean.md` beside it.
+
+**Re-runs.** Every clean file saved to Drive carries a reuse key in its description: the source's id and last-modified time. Before any work, look for it (the runtime file says how): if this exact version of the source was cleaned before, report that file and stop. If the source changed, or another file already has the name, save `<title> - clean (2).md` (then `(3)`): never overwrite.
 
 Save in the source's folder, read the file back, and compare its sha256 with `clean_sha256`. Only when they match, trash the temporary Doc this run made and confirm it reads `trashed: true`. Trash is recoverable for 30 days; never delete permanently, and never trash anything this run did not create. If the account may not add files to the source's folder, the clean file goes to My Drive root and the report says so. If a read-back does not match, stop: keep the temporary Doc and report the saved file's id so the user can check it. The runtime file has the exact calls (on the connector, `drive_txn.py` does all of this).
 
