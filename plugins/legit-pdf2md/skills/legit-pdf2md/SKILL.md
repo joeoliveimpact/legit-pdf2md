@@ -77,7 +77,7 @@ then `clean_gdoc_md.py apply-edits edits.json --state state.json`. It is all or 
 - `replace`: new text for the lines. To remove page furniture from a line, list the exact removed text in `drops` with a `reason`.
 - `delete`: remove whole lines of page furniture, with a `reason`.
 - `number_list`: rebuild a numbered list; only the stand-alone step numbers may move, each to the start of its own item, in order.
-- `move_heading`: a letter-spaced heading that landed inside a sentence moves out whole, onto its own line.
+- `move_heading`: a letter-spaced heading that landed inside a sentence moves out whole, onto its own line (`"text": "<heading>\n\n<the sentence rejoined>"` over the block's lines).
 An edit may cover a block's lines plus the line either side; deletions (`delete`, `drops`) only work on the lines that were flagged, so a real sentence sitting between two flagged lines cannot be removed. Only use ops listed for the block's types in `ops_by_type`.
 
 **What to do with each type:**
@@ -107,7 +107,7 @@ Save in the source's folder, read the file back, and compare its sha256 with `cl
 
 ## Step 6: Report
 
-Keep it short:
+A re-run that found this version already cleaned reports only that and the file's link. Otherwise keep it short:
 - Tokens before and after (`tokens`), the automatic fixes (`autofixed`), and how many edits you made.
 - The check result: validated.
 - **What could not be recovered**, every time: link addresses (only link text survives Google's export), pictures listed under `kept_in_code`, scrambled spots you left in place, blocks you left for review, and whether a temporary Doc was made and trashed.
