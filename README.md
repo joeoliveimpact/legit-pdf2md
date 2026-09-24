@@ -58,9 +58,9 @@ So the five minutes is not the price of this skill. It is the last time you set 
 
 **On Claude Code instead?** Composio ship their own plugin, which drives the CLI rather than the connector above: add the marketplace `ComposioHQ/composio-plugin-cc`, install **Composio**, then `composio link googledrive`. The skill checks for the connector and the CLI, and uses whichever you have.
 
-**Two Google accounts connected?** That is normal and it is handled - Composio will not act until one is named, so the skill names it and confirms whose Drive it is opening before it writes anything.
+**Two Google accounts connected?** That is normal and it is handled - Composio will not act until one is named, so the skill names one, checks whose Drive it is, and uses that one account for the whole run.
 
-**No connection at all?** The skill still works. Do the Drive steps yourself (upload, open with Google Docs, File > Download > Markdown), hand it the file, and it does the cleanup - which is the part you actually wanted. No account needed for that path.
+**No connection at all?** The skill still works. Do the Drive steps yourself (upload, open with Google Docs, File > Download > Markdown), hand it the file, and it does the cleanup - which is the part you actually wanted. No Composio account needed for that path, but it does need Python on your computer.
 
 ## What you get back
 

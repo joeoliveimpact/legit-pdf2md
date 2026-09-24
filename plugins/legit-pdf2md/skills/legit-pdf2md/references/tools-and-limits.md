@@ -8,7 +8,7 @@ Read this when a Composio call fails validation, when you need a tool's name for
 |---|---|---|
 | Find | `GOOGLEDRIVE_FIND_FILE`, `GOOGLEDRIVE_GET_FILE_METADATA` | `fileId`, plus `fields` for `parents` |
 | Wrong account? | `GOOGLEDRIVE_GET_ABOUT` | run on any 404 |
-| PDF to Doc | `GOOGLEDRIVE_COPY_FILE_ADVANCED` | `fileId`, `mimeType`, `ocrLanguage`, `parents: ["root"]` |
+| PDF to Doc | `GOOGLEDRIVE_COPY_FILE_ADVANCED` | `fileId`, `mimeType`, `ocrLanguage`, `parents: ["root"]`, `description` (the stamp) |
 | Export | `GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE` | `fileId`, `mimeType: text/markdown`; link at `data.file.s3url`, expires in 1 hour |
 | Save | `GOOGLEDRIVE_CREATE_FILE_FROM_TEXT` | `file_name`, `text_content`, `mime_type`, `parent_id` |
 | Read back | `GOOGLEDRIVE_DOWNLOAD_FILE` | `fileId`; link at `data.downloaded_file_content.s3url` |
@@ -44,8 +44,11 @@ Parameter casing differs between these tools; when a call fails validation, read
 - An AI can still move a real trailing number (`Chapter 3. 4`) into list position.
 
 **Drive**
-- Composio can replace its workbench sandbox between any two calls, with `/mnt/files` empty. A run survives it only through what is kept in the chat: the temporary Doc id and the edit batches. If both the sandbox and that id are lost, the temporary Doc stays in My Drive and the user is told its name.
+- Composio can replace its workbench sandbox between any two calls, with `/mnt/files` empty. A run survives it through what is kept in the chat (the temporary Doc id and the edit batches) and through the temporary Doc's description, stamped at copy time with the source's id and version, which lets a later cell find it again. A Drive search can lag a few seconds behind a new copy, so the id in the chat is still the direct record.
+- A run belongs to one version of the source (its last-modified time when the run started). Edited mid-run, the run stops and the start cell cleans the new version; temporary Docs from an older version are reported as `LEFTOVERS` and never trashed by the new run.
+- The save tool takes no shared-drive flag. If Drive answers "not found" for a shared-drive folder the source sits in, the run stops and reports it rather than saving somewhere else.
+- The reuse key names the source's version, not the clean file's content: a keyed clean file the user edited afterwards is still the one a re-run returns.
 - Two runs on the same source file at the same moment in one sandbox share one journal. Run one at a time per file.
 - The same Google Doc exports byte for byte the same every time, but two OCR copies of the same PDF can export slightly differently. So a re-run on an unchanged PDF can give a slightly different clean file; a byte-identical one already in the folder is reused, never saved twice.
-- On the CLI, the temporary Doc's id lives only in the conversation. If it is lost, the Doc is left in My Drive and the user is told its name.
+- On the CLI, the temporary Doc's id lives in the conversation; if it is lost, it is found by its stamp (`runtime-cli.md`, step 2), or left in My Drive with the user told its name.
 - A save whose read-back does not match leaves that file in Drive; the report names it.

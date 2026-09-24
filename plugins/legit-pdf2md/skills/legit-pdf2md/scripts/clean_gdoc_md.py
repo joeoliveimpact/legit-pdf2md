@@ -570,10 +570,12 @@ def check(source, cleaned):
 
 
 def clean_name(title, mime_type):
-    """The clean file's name: the source's title, minus a trailing .pdf only when the source is a PDF (a dated
-    title like "Notes 09.11.26" keeps every part), plus " - clean.md"."""
+    """The clean file's name: the source's title, minus a trailing .pdf only when the source is a PDF, or .md
+    only when it is a Markdown file (a dated title like "Notes 09.11.26" keeps every part), plus " - clean.md"."""
     if mime_type == "application/pdf" and title.lower().endswith(".pdf"):
         title = title[:-4]
+    elif mime_type == "text/markdown" and title.lower().endswith(".md"):
+        title = title[:-3]
     return f"{title} - clean.md"
 
 

@@ -57,7 +57,7 @@ Then, in the workbench: `clean_gdoc_md.py pipeline export.md --state state.json`
 - `status: needs_host_edits` with a packet: `rev`, `ops_by_type`, and `issues`, a list of blocks. Each block has an `id` (`b3`), `types`, its `lines`, its `text` with every line numbered (`171| Make a free account.`), the lines just `before` and `after` it, and sometimes `suggested_drop` or `suggested_list` (both are lists). Go to Step 3.
 - No issues left: it runs the final check itself. Go to Step 4.
 
-The runtime file has the exact cells. **Local route** (the user handed you an exported `.md`, no Composio): run the same commands with this session's own Python (`python3`; `py -3` on Windows, where `python` is often a Microsoft Store shortcut that prints "Python was not found") and the script in this skill's `scripts/` folder (inside the directory this skill was loaded from), keeping the state and edits files in a temporary folder. No Python anywhere: say so and stop.
+The runtime file has the exact cells. **Local route** (the user handed you an exported `.md`, no Composio): run the same commands with this session's own Python (`python3`; `py -3` on Windows, where `python` is often a Microsoft Store shortcut that prints "Python was not found") and the script in this skill's `scripts/` folder (inside the directory this skill was loaded from), keeping the state and edits files in a temporary folder. No Python anywhere: say so and stop. Save the result beside the user's file as `clean_name(<file name>, "text/markdown")`, never over an existing file (take `(2)`, then `(3)`), and check the saved file's sha256 equals `clean_sha256`.
 
 ## Step 3: Write the edits (judgment)
 
@@ -71,7 +71,7 @@ Read each block and write edits for it. Send them all in one file:
    "drops": ["You're here: troubleshooting • Next: the stack"], "reason": "page navigation"}]}
 ```
 
-then `clean_gdoc_md.py apply-edits edits.json --state state.json`. It is all or nothing: any error and nothing changes, the errors say why, fix them and send again. Every successful batch returns a **new packet with a new `rev` and new line numbers**; a next batch must use those. Leave a block alone if nothing in it needs changing.
+then `clean_gdoc_md.py apply-edits edits.json --state state.json`. It is all or nothing: any error and nothing changes, the errors say why, fix them and send again. Every successful batch returns a **new packet with a new `rev`, new line numbers and new block ids**; a next batch must use those. Leave a block alone if nothing in it needs changing.
 
 **The rules the script enforces.** Letters and digits must stay exactly the same and in the same order. Case, spacing, punctuation and Markdown are yours. The exceptions each need their op:
 - `replace`: new text for the lines. To remove page furniture from a line, list the exact removed text in `drops` with a `reason`.
@@ -115,7 +115,7 @@ Keep it short:
 
 ## References
 
-In the `references/` folder next to this file (read from GitHub: replace `SKILL.md` at the end of this file's link with `references/<name>`):
+In the `references/` folder next to this file. This file's own link is `https://raw.githubusercontent.com/joeoliveimpact/legit-pdf2md/v0.2.0/plugins/legit-pdf2md/skills/legit-pdf2md/SKILL.md`; replace `SKILL.md` at its end with `references/<name>`:
 - `references/runtime-connector.md`: the connector path (Claude chat, Cowork, Code, ChatGPT), cell by cell.
 - `references/runtime-cli.md`: the CLI path, including Windows with the CLI inside WSL.
 - `references/tools-and-limits.md`: every Composio tool with its parameter-casing traps, and the known limits of the script and the check. Open it when a call fails validation or a result is not explained above.

@@ -6,25 +6,33 @@ anything else happens, so cleanup trashes exactly the temporary Doc this run mad
 after the clean file was saved, read back and matched the text that passed the check. Standard library + requests.
 
   txn = Txn(run_composio_tool, "me@example.com", file_id)
-  txn.open()                          # metadata, kept in the journal
+  txn.open()                          # metadata and this run's state: always first, in every cell
   txn.export("export.md")             # a PDF is copied to a temporary Doc (OCR) in My Drive first
   txn.save(text, clean_sha256, name)  # save beside the source, read back, compare hashes
   txn.cleanup()                       # trash the temporary Doc, confirm it is trashed
 
-Composio can hand a later cell a fresh sandbox with /mnt/files empty (seen 09.23.26), so the journal is only a
-cache. Pass the temporary Doc id printed by the first cell as `temp_doc=` and a lost journal is rebuilt: the id
-is adopted only if it is an untrashed Google Doc named as this run names its copy, and never the source. A save
-first looks for an identical file already in the folder, so a reset between save and cleanup never saves twice.
+A run belongs to one version of the source (its modifiedTime when the run started). The temporary Doc carries
+that in its description, stamped by the copy call itself, so it can be proven to be this run's: the stamp names
+the source's id and version. Composio can hand a later cell a fresh sandbox with /mnt/files empty (seen
+09.23.26), so the journal is only a cache: the id printed by the first cell (`temp_doc=`), or a search of My
+Drive root for the stamp, rebuilds it. A journal or temporary Doc from an older version of the source is never
+continued; it is reported under `leftovers`. A save first looks for an identical file already in the folder, so
+a reset between save and cleanup never saves twice.
 """
 import hashlib, json, os, re
 
 DOC = "application/vnd.google-apps.document"
 JOURNALS = "/mnt/files/legit-pdf2md"
 REUSE = "legit-pdf2md reuse:"   # the clean file's Drive description: the source id and modified time it came from
+TEMP = "legit-pdf2md temp:"     # the temporary Doc's Drive description: the same, for the run that made it
 
 
 class DriveError(Exception):
     pass
+
+
+class NoRoom(DriveError):
+    """The save was refused because this account may not add files to the folder."""
 
 
 def sha(text):
@@ -52,6 +60,11 @@ def _no_room(err):
     return ("permission" in e or "cannot add" in e) and not any(w in e for w in ("rate limit", "quota", "not found"))
 
 
+def _q(s):
+    """A string inside a Drive query: backslash first, then the quote."""
+    return s.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def temp_name(title):
     """The temporary Doc's name: the source's title without a trailing .pdf, plus " - temp"."""
     return (title[:-4] if title.lower().endswith(".pdf") else title) + " - temp"
@@ -66,18 +79,12 @@ def _fetch(url):
 
 class Txn:
     def __init__(self, call, account, source, test_folder=None, temp_doc=None, journals=JOURNALS, fetch=_fetch):
-        self.call, self.account, self.source, self.fetch, self.adopt = call, account, source, fetch, temp_doc
+        self.call, self.source, self.fetch, self.adopt, self.test_folder = call, source, fetch, temp_doc, test_folder
+        self.given_account = account
         self.path = os.path.join(journals, "txn-" + re.sub(r"[^\w-]", "_", source) + ".json")
         self.j = json.load(open(self.path, encoding="utf-8")) if os.path.exists(self.path) else {}
-        live = {} if self._finished() else self.j   # a finished run pins nothing on the next one
-        if test_folder and live.get("test_folder") not in (None, test_folder):
-            raise DriveError(f"this run is in test mode for folder {live['test_folder']}, not {test_folder}")
-        if account and live.get("account") not in (None, account):   # one run, one Google account
-            raise DriveError(f"this run uses the account {live['account']}, not {account}")
-        if temp_doc and live.get("temp_doc") not in (None, temp_doc):
-            raise DriveError(f"this run's temporary Doc is {live['temp_doc']}, not {temp_doc}")
-        self.test_folder = test_folder or live.get("test_folder")   # a later cell cannot drop test mode
-        self.account = account or live.get("account")
+        self.account = account or ({} if self._finished() else self.j).get("account")   # for open()'s first read
+        self.opened = False
 
     def _finished(self):
         return bool(self.j.get("saved_ok") and (self.j.get("temp_trashed") or not self.j.get("temp_doc")))
@@ -88,6 +95,10 @@ class Txn:
             json.dump(self.j, f)
         os.replace(self.path + ".tmp", self.path)
 
+    def _need_open(self):
+        if not self.opened:
+            raise DriveError("call open() first: it checks this run's account, test folder and temporary Doc")
+
     def _run(self, slug, args):
         r, err = self.call(slug, args, account=self.account) if self.account else self.call(slug, args)
         data = r.get("data") if isinstance(r, dict) else None
@@ -96,46 +107,93 @@ class Txn:
         return data
 
     def open(self):
-        """The source's metadata. An unfinished run carries on from its journal (a verified save whose temp Doc
-        is not trashed yet is unfinished: cleanup still has to run). Only a finished run starts a new one."""
+        """The source's metadata, and this run's state. An unfinished run on the same version of the source
+        carries on from its journal (a verified save whose temporary Doc is not trashed yet is unfinished: cleanup
+        still has to run). A finished run, or one started on an older version of the source, starts a new one."""
         meta = self._run("GOOGLEDRIVE_GET_FILE_METADATA", {"fileId": self.source, "supportsAllDrives": True,
                          "fields": "id,name,mimeType,parents,driveId,modifiedTime"})
-        if not self.j or self._finished():
-            self.j = {k: v for k, v in (("test_folder", self.test_folder), ("account", self.account)) if v}
-        self.j["source"] = meta
-        if self.adopt and not self.j.get("temp_doc"):   # the sandbox was reset: take back the id from the chat
-            t = self._run("GOOGLEDRIVE_GET_FILE_METADATA", {"fileId": self.adopt, "supportsAllDrives": True,
-                          "fields": "id,name,mimeType,trashed"})
-            want = temp_name(meta["name"])
-            if t.get("trashed"):
-                raise DriveError(f"the temporary Doc {self.adopt} is already trashed: this run finished")
-            if self.adopt == meta["id"] or t.get("mimeType") != DOC or t.get("name") != want:
-                raise DriveError(f"{self.adopt} is not this run's temporary Doc (expected a Google Doc named '{want}')")
-            self.j["temp_doc"] = self.adopt
+        old, version = self.j, meta.get("modifiedTime")
+        live = bool(old) and not self._finished() and old.get("version") == version
+        j = old if live else {"version": version}   # an older version's temporary Doc is found by export, as a leftover
+        for key, given, what in (("test_folder", self.test_folder, "is in test mode for folder"),
+                                 ("account", self.given_account, "uses the account"),   # one run, one account
+                                 ("temp_doc", self.adopt, "has the temporary Doc")):
+            if given and j.get(key) not in (None, given):
+                raise DriveError(f"this run {what} {j[key]}, not {given}")
+        self.test_folder = self.test_folder or j.get("test_folder")   # a later cell cannot drop test mode
+        self.account = self.given_account or j.get("account")
+        j.update({k: v for k, v in (("test_folder", self.test_folder), ("account", self.account)) if v})
+        j["source"] = meta
+        if self.adopt and meta["mimeType"] == DOC:
+            raise DriveError("a Google Doc source has no temporary Doc: pass temp_doc=None (TEMP = None)")
+        if self.adopt and not j.get("temp_doc"):   # the sandbox was reset: take back the id from the chat
+            self._check_temp(self.adopt, meta, j)
+            j["temp_doc"] = self.adopt
+        self.j, self.opened = j, True
         self._save_journal()
         return meta
 
+    def temp_stamp(self, j=None, any_version=False):
+        """The temporary Doc's description; any_version=True gives the part every version shares."""
+        j = j or self.j
+        base = f"{TEMP} source {j['source']['id']} modified "
+        return base if any_version else base + str(j.get("version"))
+
+    def _check_temp(self, doc, meta, j):
+        """Adopt doc only if it is an untrashed Google Doc, named as this run names its copy, stamped from this
+        source, and never the source itself. A stamp from an older version means the source changed mid-run."""
+        t = self._run("GOOGLEDRIVE_GET_FILE_METADATA", {"fileId": doc, "supportsAllDrives": True,
+                      "fields": "id,name,mimeType,trashed,description"})
+        want, stamp = temp_name(meta["name"]), self.temp_stamp(j)
+        desc = t.get("description") or ""
+        if doc == meta["id"] or t.get("mimeType") != DOC or t.get("name") != want or \
+                not desc.startswith(self.temp_stamp(j, any_version=True)):
+            raise DriveError(f"{doc} is not this run's temporary Doc (expected a Google Doc named '{want}' "
+                             f"made by legit-pdf2md from this file)")
+        if t.get("trashed"):
+            raise DriveError(f"the temporary Doc {doc} is in the trash: if this run's clean file was saved, the run "
+                             f"finished; if not, run the start cell again")
+        if desc != stamp:
+            raise DriveError(f"the source changed since this run started: the temporary Doc {doc} holds an older "
+                             f"version. Run the start cell again for the current version; {doc} is left in My "
+                             f"Drive for the user to trash")
+
+    def _temps(self):
+        """This version's temporary Docs in My Drive root, found by their stamp (the id was lost). Extra ones, and
+        ones from older versions of the source, go to leftovers for the report; nothing here is trashed."""
+        name, stamp = temp_name(self.j["source"]["name"]), self.temp_stamp()
+        found = self._run("GOOGLEDRIVE_FIND_FILE", {"q": f"name = '{_q(name)}' and 'root' in parents and "
+                          f"mimeType = '{DOC}' and trashed = false", "fields": "files(id,name,description)"})
+        ours = [f for f in found.get("files") or [] if (f.get("description") or "").startswith(self.temp_stamp(any_version=True))]
+        mine = [f["id"] for f in ours if f["description"] == stamp]
+        extra = mine[1:] + [f["id"] for f in ours if f["description"] != stamp]
+        if extra:
+            self.j["leftovers"] = sorted(set(self.j.get("leftovers", []) + extra))
+        return mine[:1]
+
     def export(self, path, ocr_language="en", copy=True):
         """Write the source's Markdown export to path. A PDF becomes a temporary Doc first (Google's OCR reads
-        scanned pages, in ocr_language), made in the user's private My Drive root and logged before it is used.
-        copy=False (every cell after the first) never makes one: without a known temporary Doc it stops."""
+        scanned pages, in ocr_language), made in the user's private My Drive root, stamped, and logged before it
+        is used. If the run has no id for it, one made earlier for this version is found by its stamp first.
+        copy=False (every cell after the first) never makes one: without a temporary Doc it stops."""
+        self._need_open()
         src = self.j["source"]
         doc = src["id"]
         if src["mimeType"] != DOC:
-            if not self.j.get("temp_doc") and not copy:
-                raise DriveError("no temporary Doc id for this run: pass the id the first cell printed (temp_doc=)")
             if not self.j.get("temp_doc"):
-                name = temp_name(src["name"])
-                if self.j.get("copy_started"):   # a crash between a copy and its log: that Doc may exist
-                    self.j["possible_orphan"] = f"'{self.j['copy_started']}' in My Drive (a copy whose id was lost)"
-                self.j["copy_started"] = name
-                self._save_journal()
-                data = self._run("GOOGLEDRIVE_COPY_FILE_ADVANCED", {"fileId": doc, "mimeType": DOC, "ocrLanguage": ocr_language,
-                                 "supportsAllDrives": True, "name": name, "parents": ["root"]})
-                if not data.get("id"):
-                    raise DriveError(f"the copy returned no id, so the temporary Doc cannot be tracked; look for "
-                                     f"'{name}' in My Drive and trash it by hand")
-                self.j["temp_doc"] = data["id"]
+                found = self._temps()
+                if found:
+                    self.j["temp_doc"] = found[0]
+                elif not copy:
+                    raise DriveError("no temporary Doc for this version of the source: run the start cell again")
+                else:
+                    data = self._run("GOOGLEDRIVE_COPY_FILE_ADVANCED", {"fileId": doc, "mimeType": DOC,
+                                     "ocrLanguage": ocr_language, "supportsAllDrives": True, "name": temp_name(src["name"]),
+                                     "parents": ["root"], "description": self.temp_stamp()})
+                    if not data.get("id"):
+                        raise DriveError("the copy returned no id; run the start cell again: it finds the copy by "
+                                         "its description instead of making another")
+                    self.j["temp_doc"] = data["id"]
                 self._save_journal()
             doc = self.j["temp_doc"]
         url = _find(self._run("GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE", {"fileId": doc, "mimeType": "text/markdown"}), "s3url")
@@ -151,6 +209,7 @@ class Txn:
     def save(self, text, clean_sha256, name):
         """Save beside the source, read it back and compare. Returns where it went. Raises, and leaves the
         temporary Doc alone, if the text is not the checked text or the read-back differs."""
+        self._need_open()
         if sha(text) != clean_sha256:
             raise DriveError("this text is not the text that passed the check (hash differs); not saved")
         if self.j.get("saved_ok"):   # run again after a verified save (a re-run cell): never a second file
@@ -160,24 +219,31 @@ class Txn:
         parent = (self.j["source"].get("parents") or [None])[0]
         if self.test_folder and parent != self.test_folder:
             raise DriveError(f"test mode: the source is not in the test folder {self.test_folder}; not saved")
-        args = {"text_content": text, "mime_type": "text/markdown"}
+        mine = f"{REUSE} source {self.j['source']['id']} "
 
         def put(folder, extra):
             files = self._candidates(name, folder)
-            for f in files:   # an identical file already there (a reset after the save) is this run's save
-                if self._content_is(f["id"], clean_sha256):
+            for f in files:   # an identical file of ours already there (a reset after the save) is this run's save
+                desc = f.get("description") or ""   # blank (a reset before the key) or our key; never a user's note
+                if (not desc or desc.startswith(mine)) and self._content_is(f["id"], clean_sha256):
                     return {"id": f["id"], "name": f["name"], "reused": True}
             taken, final, n = {f["name"] for f in files}, name, 2
             while final in taken:   # never overwrite: another file has the name, so "<title> - clean (2).md"
                 final = f"{name[:-3]} ({n}).md"
                 n += 1
-            return {**self._run("GOOGLEDRIVE_CREATE_FILE_FROM_TEXT", {**args, "file_name": final, **extra}), "name": final}
+            try:
+                return {**self._run("GOOGLEDRIVE_CREATE_FILE_FROM_TEXT", {"text_content": text, "mime_type": "text/markdown",
+                                    "file_name": final, **extra}), "name": final}
+            except DriveError as e:   # only the create call's refusal can send the file somewhere else
+                if _no_room(e):
+                    raise NoRoom(str(e)) from e
+                raise
         if parent:
             where = "beside the source"
             try:
                 data = put(parent, {"parent_id": parent})
-            except DriveError as e:
-                if self.test_folder or not _no_room(e):
+            except NoRoom:
+                if self.test_folder:
                     raise
                 data = put("root", {})
                 where = "My Drive root (no permission to add files to the source's folder)"
@@ -195,34 +261,39 @@ class Txn:
             if sha(self.fetch(url)) != clean_sha256:
                 raise DriveError(f"read-back of {data['id']} does not match the checked text; the temporary Doc is kept")
         self.j["saved_ok"] = True
-        try:   # the reuse key: a later run on this unchanged source finds this file and does no work
-            self._run("GOOGLEDRIVE_UPDATE_FILE_PUT", {"fileId": data["id"], "description": self.reuse_key()})
-            self.j["saved"]["reuse_key"] = True
-        except DriveError:   # the save stands; only the shortcut for next time is lost
-            self.j["saved"]["reuse_key"] = False
+        self.j["saved"]["reuse_key"] = False
         self._save_journal()
+        if self.reuse_key():   # a later run on this unchanged source finds this file and does no work
+            try:
+                self._run("GOOGLEDRIVE_UPDATE_FILE_PUT", {"fileId": data["id"], "description": self.reuse_key()})
+                self.j["saved"]["reuse_key"] = True
+                self._save_journal()
+            except Exception:   # the save stands; only the shortcut for next time is lost
+                pass
         return self.j["saved"]
 
     def reuse_key(self):
-        src = self.j["source"]
-        return f"{REUSE} source {src['id']} modified {src.get('modifiedTime')}"
+        """The key for the version this run started on; None when Drive gave no modified time."""
+        v = self.j.get("version")
+        return f"{REUSE} source {self.j['source']['id']} modified {v}" if v else None
 
     def reusable(self, name):
         """A clean file this skill already made from this exact version of the source (same id and modified
         time), found by the key in its description: {"id", "name", "where"}, or None. Call after open()."""
+        self._need_open()
+        key = self.reuse_key()
         parent = (self.j["source"].get("parents") or [None])[0]
         for folder, where in ((parent, "beside the source"), ("root", "My Drive root")):
-            if folder:
+            if folder and key:
                 for f in self._candidates(name, folder):
-                    if f.get("description") == self.reuse_key():
+                    if f.get("description") == key:
                         return {"id": f["id"], "name": f["name"], "where": where}
         return None
 
     def _candidates(self, name, folder):
         """Files in folder named name, or name with a " (N)" before .md."""
         stem = name[:-3] if name.endswith(".md") else name
-        esc = stem.replace("\\", "\\\\").replace("'", "\\'")
-        found = self._run("GOOGLEDRIVE_FIND_FILE", {"q": f"name contains '{esc}' and '{folder}' in parents and trashed = false",
+        found = self._run("GOOGLEDRIVE_FIND_FILE", {"q": f"name contains '{_q(stem)}' and '{folder}' in parents and trashed = false",
                           "fields": "files(id,name,description)", "supportsAllDrives": True, "includeItemsFromAllDrives": True})
         pat = re.compile(re.escape(stem) + r"( \(\d+\))?\.md")
         return [f for f in found.get("files") or [] if pat.fullmatch(f.get("name", ""))]
@@ -233,6 +304,7 @@ class Txn:
 
     def cleanup(self):
         """Trash this run's temporary Doc, only after a verified save, and confirm it is trashed."""
+        self._need_open()
         doc = self.j.get("temp_doc")
         if not doc or self.j.get("temp_trashed"):
             return {"temp_doc": doc, "trashed": bool(doc)}
