@@ -70,11 +70,37 @@ def temp_name(title):
     return (title[:-4] if title.lower().endswith(".pdf") else title) + " - temp"
 
 
-def _fetch(url):
+MAX_PAGES = 80   # Google converts only a PDF's first 80 pages to a Doc, silently (measured 09.24.26: 100 in, 80 out)
+
+
+def pdf_pages(data):
+    """A PDF's page count from its page tree (/Type /Pages ... /Count N); when the tree sits in compressed object
+    streams (/Type /ObjStm), only those are opened. None when no page tree is found. Standard library only."""
+    import zlib
+
+    def counts(blob):   # the /Count inside the same dictionary as each /Type /Pages
+        out = []
+        for m in re.finditer(rb"/Type\s*/Pages\b", blob):
+            a, b = blob.rfind(b"<<", 0, m.start()), blob.find(b">>", m.end())
+            out += [int(c) for c in re.findall(rb"/Count\s+(\d+)", blob[max(a, 0):b if b > 0 else m.end() + 300])]
+        return out
+    found = counts(data)
+    if not found:
+        for m in re.finditer(rb"/Type\s*/ObjStm\b", data):
+            s = re.compile(rb"stream\r?\n").search(data, m.end())
+            if s:
+                try:
+                    found += counts(zlib.decompressobj().decompress(data[s.end():s.end() + 2_000_000]))
+                except zlib.error:
+                    pass
+    return max(found) if found else None
+
+
+def _fetch(url, raw=False):
     import requests
-    r = requests.get(url, timeout=60)
+    r = requests.get(url, timeout=120)
     r.raise_for_status()
-    return r.content.decode("utf-8")
+    return r.content if raw else r.content.decode("utf-8")
 
 
 class Txn:
@@ -186,7 +212,14 @@ class Txn:
                     self.j["temp_doc"] = found[0]
                 elif not copy:
                     raise DriveError("no temporary Doc for this version of the source: run the start cell again")
-                else:
+                else:   # a long PDF would lose its tail with no error: stop before any copy is made
+                    url = _find(self._run("GOOGLEDRIVE_DOWNLOAD_FILE", {"fileId": doc}), "s3url")
+                    pages = pdf_pages(self.fetch(url, raw=True)) if url else None
+                    self.j["pages"] = pages
+                    if pages and pages > MAX_PAGES:
+                        raise DriveError(f"this PDF has {pages} pages, and Google converts only the first {MAX_PAGES} to "
+                                         f"text, without saying so. Split it into parts of {MAX_PAGES} pages or fewer "
+                                         f"and run each part; nothing was copied")
                     data = self._run("GOOGLEDRIVE_COPY_FILE_ADVANCED", {"fileId": doc, "mimeType": DOC,
                                      "ocrLanguage": ocr_language, "supportsAllDrives": True, "name": temp_name(src["name"]),
                                      "parents": ["root"], "description": self.temp_stamp()})

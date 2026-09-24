@@ -602,6 +602,11 @@ class FakeDrive:
         self.export_error, self.no_link, self.trash_sticks = export_error, no_link, trash_sticks
         self.key_error = self.find_error = None
 
+    def get(self, url, raw=False):   # drive_txn's fetch: text, or bytes for a PDF
+        body = self.urls[url]
+        assert raw == isinstance(body, bytes), ("text fetched as bytes or bytes as text", url)
+        return body
+
     def _url(self, text):
         self.n += 1
         self.urls[f"u{self.n}"] = text
@@ -637,8 +642,9 @@ class FakeDrive:
             self.files[nid] = {"id": nid, "name": a["file_name"], "parent": a.get("parent_id", "root"),
                                "body": a["text_content"].replace("\n", "\r\n") + ("x" if self.corrupt else "")}
             return {"data": {"id": nid}}, ""
-        if slug == "GOOGLEDRIVE_DOWNLOAD_FILE":
-            return {"data": {"id": f["id"]} if self.no_link else {"downloaded_file_content": self._url(f["body"])}}, ""
+        if slug == "GOOGLEDRIVE_DOWNLOAD_FILE":   # a PDF downloads as its bytes: a 12-page tree unless set
+            body = f.get("pdf", b"<< /Type /Pages /Kids [3 0 R] /Count 12 >>") if f.get("mimeType") == PDF else f["body"]
+            return {"data": {"id": f["id"]} if self.no_link else {"downloaded_file_content": self._url(body)}}, ""
         if slug == "GOOGLEDRIVE_TRASH_FILE":
             f["trashed"] = self.trash_sticks
             return {"data": {"id": f["id"]}}, ""
@@ -691,7 +697,7 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
         fd = FakeDrive()
 
         def mk(src, account="me", journals=d, **k):
-            x = t.Txn(fd, account, src, journals=journals, fetch=fd.urls.__getitem__, **k)
+            x = t.Txn(fd, account, src, journals=journals, fetch=fd.get, **k)
             x.open()
             return x
         trashes = lambda: [i for s, i in fd.log if s == "GOOGLEDRIVE_TRASH_FILE"]
@@ -753,7 +759,7 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
             fd = FakeDrive(**fd_kw)
             fd.files["src"]["modifiedTime"] = "T1"
             fd.files["same"] = {"id": "same", "name": "Guide - clean.md", "parent": "fold", "body": text}   # identical text
-            x = t.Txn(fd, "me", "src", journals=d, fetch=fd.urls.__getitem__, **save_kw)
+            x = t.Txn(fd, "me", "src", journals=d, fetch=fd.get, **save_kw)
             x.open()
             x.export(os.path.join(d, "e.md"))
             if name.startswith("a permission error while searching"):
@@ -771,7 +777,7 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
         e = os.path.join(d, "e.md")
 
         def mk(src, account="me", journals=d, **k):
-            x = t.Txn(fd, account, src, journals=journals, fetch=fd.urls.__getitem__, **k)
+            x = t.Txn(fd, account, src, journals=journals, fetch=fd.get, **k)
             x.open()
             return x
         # no permission beside the source: My Drive root, it says why, and a re-run finds it there by its key
@@ -864,7 +870,7 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
         e = os.path.join(d, "e.md")
 
         def mk(src, account="me", journals=d, **k):
-            x = t.Txn(fd, account, src, journals=journals, fetch=fd.urls.__getitem__, **k)
+            x = t.Txn(fd, account, src, journals=journals, fetch=fd.get, **k)
             x.open()
             return x
         # F2: two PDFs with the same title in different folders never take each other's temporary Doc
@@ -937,6 +943,26 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
         x = mk("src", journals=d + "/noid-reset")
         x.export(e)
         assert fd.copies == 1 and x.j["temp_doc"] == "tmp1", (fd.copies, x.j)
+        # Google converts only a PDF's first 80 pages, silently: a longer PDF stops before any copy is made
+        import zlib
+        assert t.pdf_pages(b"1 0 obj << /Type /Pages /Kids [2 0 R] /Count 12 >> 3 0 obj << /Type /Outlines /Count 40 >>") == 12
+        objstm = (b"4 0 obj << /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode >>\nstream\n"
+                  + zlib.compress(b"1 0 << /Type /Pages /Kids [5 0 R] /Count 90 >>") + b"\nendstream")
+        assert t.pdf_pages(objstm) == 90 and t.pdf_pages(b"%PDF-1.4 no page tree") is None
+        for pages, copies in ((81, 0), (80, 1)):
+            fd = FakeDrive()
+            fd.files["src"]["pdf"] = f"<< /Type /Pages /Kids [3 0 R] /Count {pages} >>".encode()
+            x = mk("src", journals=d + f"/long{pages}")
+            if pages > t.MAX_PAGES:
+                assert "81 pages" in _refused(lambda: x.export(e), "a long PDF would lose its tail")
+            else:
+                x.export(e)
+            assert fd.copies == copies and x.j["pages"] == pages, (pages, fd.copies, x.j)
+        fd = FakeDrive()
+        fd.files["src"]["pdf"] = b"%PDF-1.4 no page tree"   # unknown page count: never blocks
+        x = mk("src", journals=d + "/unknown")
+        x.export(e)
+        assert fd.copies == 1 and x.j["pages"] is None
         # the OCR language reaches the copy
         fd = FakeDrive()
         mk("src", journals=d + "/o").export(e, "de")

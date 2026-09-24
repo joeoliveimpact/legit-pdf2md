@@ -39,6 +39,10 @@ Parameter casing differs between these tools; when a call fails validation, read
 - Autofix can join lines inside a multi-line inline code span (letters unchanged). Dropping every letter of an inline code span leaves empty backticks.
 - `kept_in_code` (informational) can differ between runs on the same export; the image verdict never does.
 
+**Long and large PDFs**
+- Google converts only a PDF's first 80 pages to a Doc and says nothing (measured: 100 pages in, 80 out). The run counts the pages first and stops above 80, before any copy; a PDF whose page count cannot be read is not blocked.
+- A large PDF (32 MB in testing) can come out with every picture dropped by Google's conversion. The check compares against the export, so it cannot see pictures the export never had: the report's picture count is the only sign.
+
 **Scanned PDFs**
 - OCR text is looser: page navigation and a handle split across words (`@JOEOLIVE IMPACT`) may not be flagged, so they can stay; a list can fall across two blocks and not be rebuildable as one; a step whose text OCR missed leaves only its number (drop it with a reason). Screenshot text is read as words. Report what was left.
 

@@ -13,6 +13,7 @@
 - **Re-runs reuse.** The clean file carries a reuse key (the source's id and last-modified time). Run it again on an unchanged file and you get the clean file back with no work done; if the file changed, the new one is `(2)`. Nothing is ever overwritten.
 - **Works through the connector (Claude and ChatGPT) and the CLI (including Windows with Composio in WSL),** with a guide for each in `references/`. Proven end to end on both, and in ChatGPT.
 - **An expired download link stops the run** instead of being cleaned as if it were the document.
+- **A PDF over 80 pages stops before anything is copied.** Google converts only the first 80 pages and says nothing; the skill counts the pages first and asks for the PDF in parts.
 
 ## 0.1.4 - 2026-09-22
 
