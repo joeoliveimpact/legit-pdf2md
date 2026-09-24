@@ -274,6 +274,15 @@ def detached_number_lists_go_to_the_ai(m):
             if x[side]:
                 n, _, line = x[side].partition("| ")
                 assert L[int(n) - 1] == line and line.strip() and not x["lines"][0] <= int(n) <= x["lines"][1], (side, x)
+    # the numbers the packet shows are the ones an edit may use: through the line after, blank rows included
+    x = next(x for x in r["issues"] if x["after"])
+    n = int(x["after"].partition("| ")[0])
+    same = lambda st, r: [{"issue": x["id"], "op": "replace", "lines": [x["lines"][0], n],
+                           "text": "\n".join(L[x["lines"][0] - 1:n])}]
+    assert run_pipeline(m, GUIDE, same)[1] == [], "an edit through the packet's `after` line was refused"
+    long = "word " * 120   # a long neighbouring paragraph is cut at 400 characters, and says so
+    after = next(x for x in m.analyze("T O S T A R T\n\n" + long + "\n") if x["after"])["after"]
+    assert after.endswith(" …") and len(after.partition("| ")[2]) == 402, after[-20:]
     blk = [x for x in r["issues"] if "suggested_list" in x]
     assert len(blk) == 1 and "number_list" in r["ops_by_type"]["number_list"], blk
     assert blk[0]["suggested_list"][0]["text"].startswith("1. Make a free account. It takes a minute.\n2. Connect"), blk
@@ -642,6 +651,8 @@ class FakeDrive:
             self.files[nid] = {"id": nid, "name": a["file_name"], "parent": a.get("parent_id", "root"),
                                "body": a["text_content"].replace("\n", "\r\n") + ("x" if self.corrupt else "")}
             return {"data": {"id": nid}}, ""
+        if slug == "GOOGLEDRIVE_DOWNLOAD_FILE" and f.get("mimeType") == PDF and getattr(self, "download_error", None):
+            return {"data": None}, self.download_error
         if slug == "GOOGLEDRIVE_DOWNLOAD_FILE":   # a PDF downloads as its bytes: a 12-page tree unless set
             body = f.get("pdf", b"<< /Type /Pages /Kids [3 0 R] /Count 12 >>") if f.get("mimeType") == PDF else f["body"]
             return {"data": {"id": f["id"]} if self.no_link else {"downloaded_file_content": self._url(body)}}, ""
@@ -949,6 +960,10 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
         objstm = (b"4 0 obj << /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode >>\nstream\n"
                   + zlib.compress(b"1 0 << /Type /Pages /Kids [5 0 R] /Count 90 >>") + b"\nendstream")
         assert t.pdf_pages(objstm) == 90 and t.pdf_pages(b"%PDF-1.4 no page tree") is None
+        tree = (b"1 0 obj <</Type/Pages/Kids [2 0 R 3 0 R]/Count 100>> 2 0 obj << /Type /Pages /Parent 1 0 R /Count 40 >>"
+                b" 3 0 obj << /Type /Pages /Parent 1 0 R /Count 60 >>")   # two levels, no spaces: the root's count
+        bad = b"4 0 obj << /Type /ObjStm /N 1 >>\nstream\nnot zlib at all\nendstream"   # unreadable: never blocks
+        assert t.pdf_pages(tree) == 100 and t.pdf_pages(bad) is None
         for pages, copies in ((81, 0), (80, 1)):
             fd = FakeDrive()
             fd.files["src"]["pdf"] = f"<< /Type /Pages /Kids [3 0 R] /Count {pages} >>".encode()
@@ -958,11 +973,13 @@ def drive_txn_saves_verifies_then_trashes_only_its_own(m):
             else:
                 x.export(e)
             assert fd.copies == copies and x.j["pages"] == pages, (pages, fd.copies, x.j)
-        fd = FakeDrive()
-        fd.files["src"]["pdf"] = b"%PDF-1.4 no page tree"   # unknown page count: never blocks
-        x = mk("src", journals=d + "/unknown")
-        x.export(e)
-        assert fd.copies == 1 and x.j["pages"] is None
+        for how in ("no page tree", "download fails"):   # a count that cannot be read never blocks
+            fd = FakeDrive()
+            fd.files["src"]["pdf"] = b"%PDF-1.4 no page tree"
+            fd.download_error = "413 file too large" if how == "download fails" else None
+            x = mk("src", journals=d + "/unknown-" + how.replace(" ", "-"))
+            x.export(e)
+            assert fd.copies == 1 and x.j["pages"] is None, (how, x.j)
         # the OCR language reaches the copy
         fd = FakeDrive()
         mk("src", journals=d + "/o").export(e, "de")

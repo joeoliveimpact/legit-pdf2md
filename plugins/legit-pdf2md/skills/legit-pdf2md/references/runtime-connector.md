@@ -27,7 +27,8 @@ for f in ("clean_gdoc_md.py", "drive_txn.py"):
     got = requests.get(BASE + f, timeout=60); got.raise_for_status()
     open(f"{W}/{f}", "w", encoding="utf-8").write(got.text)
 sys.path.insert(0, W)
-import drive_txn, clean_gdoc_md
+import importlib, drive_txn, clean_gdoc_md
+importlib.reload(drive_txn); importlib.reload(clean_gdoc_md)   # a kept kernel can hold an older copy
 about, err = run_composio_tool("GOOGLEDRIVE_GET_ABOUT", {}, account=ACCOUNT) if ACCOUNT else run_composio_tool("GOOGLEDRIVE_GET_ABOUT", {})
 print("signed in as:", json.dumps((about or {}).get("data", {}).get("user", {}).get("emailAddress")), err or "")
 txn = drive_txn.Txn(run_composio_tool, ACCOUNT, FILE)
@@ -67,7 +68,8 @@ for f in ("clean_gdoc_md.py", "drive_txn.py"):
     got = requests.get(BASE + f, timeout=60); got.raise_for_status()
     open(f"{W}/{f}", "w", encoding="utf-8").write(got.text)
 sys.path.insert(0, W)
-import drive_txn, clean_gdoc_md
+import importlib, drive_txn, clean_gdoc_md
+importlib.reload(drive_txn); importlib.reload(clean_gdoc_md)   # a kept kernel can hold an older copy
 EXPORT, STATE, CLEAN = f"{W}/export-{FILE}.md", f"{W}/state-{FILE}.json", f"{W}/clean-{FILE}.md"
 txn = drive_txn.Txn(run_composio_tool, ACCOUNT, FILE, temp_doc=TEMP)
 src = txn.open()

@@ -769,13 +769,16 @@ def analyze(text, nav_openings=()):
             j += step
         return j if 0 <= j < len(lines) else None
 
+    def near(j):   # the neighbouring line with its number; a long paragraph is cut at 400 characters, marked " …"
+        return "" if j is None else f"{j + 1}| " + (lines[j] if len(lines[j]) <= 400 else lines[j][:400] + " …")
+
     def add(kind, a, b, conf, safe, fix=None, **extra):
         if any(i in taken for i in range(a, b + 1)):
             return
         taken.update(range(a, b + 1))
         p, n = ctx(a, -1), ctx(b, 1)
         issues.append({"type": kind, "lines": [a + 1, b + 1], "text": "\n".join(lines[a:b + 1]),
-                       "before": f"{p + 1}| {lines[p]}" if p is not None else "", "after": f"{n + 1}| {lines[n]}" if n is not None else "",
+                       "before": near(p), "after": near(n),
                        "context_lines": [p + 1 if p is not None else a + 1, n + 1 if n is not None else b + 1],
                        "confidence": conf, "safe_autofix": safe, "ops": HOST_OPS.get(kind, []), **({"fix": fix} if fix else {}),
                        **extra})

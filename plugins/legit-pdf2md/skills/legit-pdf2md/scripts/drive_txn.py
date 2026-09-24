@@ -74,8 +74,15 @@ MAX_PAGES = 80   # Google converts only a PDF's first 80 pages to a Doc, silentl
 
 
 def pdf_pages(data):
-    """A PDF's page count from its page tree (/Type /Pages ... /Count N); when the tree sits in compressed object
-    streams (/Type /ObjStm), only those are opened. None when no page tree is found. Standard library only."""
+    """A PDF's page count, or None when it cannot be read. pypdf (in Composio's workbench) follows incremental
+    updates and object streams; without it, a standard-library read of the page tree (/Type /Pages ... /Count N),
+    opening compressed object streams only when the raw file shows none. That fallback can misread a PDF edited
+    after it was made, or a page tree with a dictionary nested inside it."""
+    try:
+        import io, pypdf
+        return len(pypdf.PdfReader(io.BytesIO(data)).pages)
+    except Exception:   # not installed, or a file pypdf cannot read: the fallback below
+        pass
     import zlib
 
     def counts(blob):   # the /Count inside the same dictionary as each /Type /Pages
@@ -213,8 +220,11 @@ class Txn:
                 elif not copy:
                     raise DriveError("no temporary Doc for this version of the source: run the start cell again")
                 else:   # a long PDF would lose its tail with no error: stop before any copy is made
-                    url = _find(self._run("GOOGLEDRIVE_DOWNLOAD_FILE", {"fileId": doc}), "s3url")
-                    pages = pdf_pages(self.fetch(url, raw=True)) if url else None
+                    try:   # a count that cannot be read never blocks the run
+                        url = _find(self._run("GOOGLEDRIVE_DOWNLOAD_FILE", {"fileId": doc}), "s3url")
+                        pages = pdf_pages(self.fetch(url, raw=True)) if url else None
+                    except Exception:
+                        pages = None
                     self.j["pages"] = pages
                     if pages and pages > MAX_PAGES:
                         raise DriveError(f"this PDF has {pages} pages, and Google converts only the first {MAX_PAGES} to "
