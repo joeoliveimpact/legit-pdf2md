@@ -592,7 +592,26 @@ CODE_ONLY = re.compile(r"\s*`([^`]+)`\s*")   # a line that is one single-backtic
 HOST_OPS = {"letter_spaced": ["replace", "move_heading", "delete"], "code_label": ["replace"],
             "odd_asterisks": ["replace"], "repeated_line": ["delete", "replace"],
             "page_nav_attached": ["replace"], "detached_number": ["number_list", "replace"],
-            "number_list": ["number_list", "replace"]}
+            "number_list": ["number_list", "replace"], "glued_words": ["replace"]}
+# words the export ran together across table cells ("ClaudeChat only", "Metricool20 posts"); names written that way
+# on purpose are skipped here, and the AI leaves any other real one alone
+GLUED = re.compile(r"[A-Za-z]*[a-z]{2}(?:[A-Z][a-z]|\d)[A-Za-z0-9]*")
+CAMEL_OK = {"youtube", "linkedin", "manychat", "hubspot", "gohighlevel", "tiktok", "iphone", "ipad", "whatsapp",
+            "paypal", "javascript", "typescript", "github", "wordpress", "clickfunnels", "convertkit", "socialcrawl",
+            "deepseek", "notebooklm", "powerpoint", "quickbooks", "mailchimp", "soundcloud", "doordash", "facetime",
+            "airpods", "macbook", "activecampaign", "clickup", "chatgpt", "openai", "airtable", "dropbox", "zapier"}
+
+
+def _glued(line):
+    """Tokens in a line that look like two words run together. Code, web addresses and handles are skipped."""
+    out = []
+    for w in CODE_SPAN.sub(" ", line).split():
+        if re.search(r"[./@_:#\\]", w):
+            continue
+        m = GLUED.fullmatch(w.strip("*,;!?()[]\"'"))
+        if m and m.group(0).casefold() not in CAMEL_OK:
+            out.append(m.group(0))
+    return out
 
 
 def _sha(text):
@@ -916,6 +935,11 @@ def analyze(text, nav_openings=()):
             add("odd_asterisks", i, i, 0.6, False)
         elif counts[lines[i].strip()] >= 3:
             add("repeated_line", i, i, 0.6, False)
+    # the letters check cannot see a missing space, so these always go to the AI (E7, 09.25.26)
+    for i in prose:
+        hits = _glued(lines[i])
+        if hits:
+            add("glued_words", i, i, 0.5, False, suspects=hits)
     issues.sort(key=lambda x: x["lines"][0])
     for n, x in enumerate(issues, 1):
         x["id"] = f"i{n}"
@@ -939,12 +963,15 @@ def _group(issues, text):
             for k in ("suggested_drop", "suggested_list"):
                 if k in x:
                     b.setdefault(k, []).append(x[k])
+            if "suspects" in x:
+                b.setdefault("suspects", []).extend(x["suspects"])
         else:
             blocks.append({"types": [x["type"]], "lines": list(x["lines"]), "before": x["before"],
                            "after": x["after"], "ops": list(x["ops"]), "context_lines": list(x["context_lines"]),
                            "flagged": list(range(x["lines"][0], x["lines"][1] + 1)),
                            "movable": list(range(x["lines"][0], x["lines"][1] + 1)) if "move_heading" in x["ops"] else [],
-                           "safe_autofix": False, **{k: [x[k]] for k in ("suggested_drop", "suggested_list") if k in x}})
+                           "safe_autofix": False, **{k: [x[k]] for k in ("suggested_drop", "suggested_list") if k in x},
+                           **({"suspects": list(x["suspects"])} if "suspects" in x else {})})
     for n, b in enumerate(blocks, 1):
         b["id"] = f"b{n}"
         # every line with its number ("171| text"), blank ones too, so the AI can name exact lines
@@ -1120,7 +1147,7 @@ def _host_issues(st):
 def _packet(st):
     """What the AI needs to write edits: rev (edits must quote it, so a batch written for an older text is
     refused), the ops per issue type, and the issue blocks."""
-    keep = ("id", "types", "lines", "text", "before", "after", "suggested_drop", "suggested_list")
+    keep = ("id", "types", "lines", "text", "before", "after", "suggested_drop", "suggested_list", "suspects")
     return {"rev": _sha(st["text"])[:12], "ops_by_type": HOST_OPS,
             "issues": [{k: x[k] for k in keep if k in x} for x in st["issues"]]}
 

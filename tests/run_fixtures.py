@@ -363,6 +363,35 @@ def apply_edits_rejects_added_word_and_out_of_range(m):
 
 
 @fixture
+def glued_table_words_go_to_the_ai(m):
+    """E7 09.25.26: Google's export ran pricing-table cells together ("ClaudeChat only") and the letters check passed
+    it. They are flagged with suspects, never autofixed; splitting them validates, real camel-case names are left."""
+    export = ("# Costs\n\nClaudeChat only. Cowork and Code are not on free\n\n"
+              "Metricool20 posts a month, one brand\n\nWatch my YouTube channel and ChatGPT tips\n\nThe end.\n")
+    r, _, st = run_pipeline(m, export)
+    blocks = [b for b in r["issues"] if "glued_words" in b["types"]]
+    sus = sorted(s for b in blocks for s in b.get("suspects", []))
+    assert sus == ["ClaudeChat", "Metricool20"], (sus, r["issues"])
+    assert all("ChatGPT" not in b["text"] for b in blocks), blocks
+
+    def split(st, r):
+        out = []
+        for word, fixed in (("ClaudeChat", "Claude Chat"), ("Metricool20", "Metricool 20")):
+            ln, i = _issue_for(st, word)
+            out.append({"issue": i, "op": "replace", "lines": [ln, ln], "text": st["text"].split("\n")[ln - 1].replace(word, fixed)})
+        return out
+    r, errors, st = run_pipeline(m, export, split, final=True)
+    assert errors == [] and r["status"] == "validated", (errors, r)
+    assert "Claude Chat only" in st["text"] and "Metricool 20 posts" in st["text"], st["text"]
+
+    def respell(st, r):
+        ln, i = _issue_for(st, "ClaudeChat")
+        return [{"issue": i, "op": "replace", "lines": [ln, ln], "text": "Claude Chats only. Cowork and Code are not on free"}]
+    _, errors, _ = run_pipeline(m, export, respell)
+    assert errors and "changes the wording" in errors[0], errors
+
+
+@fixture
 def edit_scope_and_batch_guards(m):
     """Deletions stay on flagged lines; an edit naming two blocks cannot take the real text between them;
     overlapping edits and a batch with one bad edit change nothing; a second apply-edits run through the CLI

@@ -14,6 +14,8 @@
 - **Works through the connector (Claude and ChatGPT) and the CLI (including Windows with Composio in WSL),** with a guide for each in `references/`. Proven end to end on both, and in ChatGPT.
 - **An expired download link stops the run** instead of being cleaned as if it were the document.
 - **A PDF over 80 pages stops before anything is copied.** Google converts only the first 80 pages and says nothing; the skill counts the pages first and asks for the PDF in parts.
+- **Words run together across table cells are caught.** Google's export glues neighbouring cells (`ClaudeChat only`, `Metricool20 posts`), and a letters-only check cannot see a missing space. They now go to the AI as `glued_words`, which may only add the space back. Real names written that way (`YouTube`, `HubSpot`) are left alone. Found in the ChatGPT integration test.
+- **Plain requests start it.** "Turn this PDF into markdown" with a Drive link picks this skill in Claude without naming it (tested headless). In ChatGPT, mention `@legit-pdf2md`: there the plain sentence lets ChatGPT use its own PDF tools.
 
 ## 0.1.4 - 2026-09-22
 
