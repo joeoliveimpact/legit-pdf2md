@@ -30,6 +30,8 @@ You can already do this by hand: upload to Drive, open with Google Docs, downloa
 
 Because you installed it as a plugin, it updates itself whenever it improves. Nothing to re-download.
 
+**On ChatGPT:** in the sidebar click **Plugins**, then top right **Add**, then **Add a marketplace**. Paste `joeoliveimpact/legit-pdf2md`, find **legit-pdf2md** in the list and click **+**. Start a new chat and begin with `@legit-pdf2md`: *"@legit-pdf2md turn this PDF into markdown"* with a Drive link. Without the `@`, ChatGPT tends to reach for its own PDF tools instead of this skill.
+
 ## Connect Google Drive (about 5 minutes, once)
 
 The skill reaches your Drive through [Composio](https://composio.dev). You only do this once.

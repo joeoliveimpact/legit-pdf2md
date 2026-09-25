@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 - 2026-09-23
+## 0.2.0 - 2026-09-25
 
 **A script does everything that is certain, the AI decides only what needs reading, and nothing is saved until a check proves no word or picture was lost.** Built from Joe's ChatGPT run of 0.1.3 (it worked, slowly) and its 87-section report, then hardened by independent checker rounds and live runs in Claude and ChatGPT.
 

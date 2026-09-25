@@ -29,7 +29,7 @@ Google's own Markdown export is the cheapest way to get text out of a PDF, and t
 - **The check** (`pipeline --final`) compares the result with the export letter by letter and picture by picture. It is what makes the promise true, so never clean by hand when the script cannot run: stop and say so.
 
 The script and the Drive helper are fetched from this skill's public repo into Composio's workbench (a remote Python sandbox), so the user needs no Python and no coding setup. Always fetch from this URL; never use a copy of the repo already in the sandbox, which can be an older version:
-`https://raw.githubusercontent.com/joeoliveimpact/legit-pdf2md/legit-pdf2md--v0.2.0-rc4/plugins/legit-pdf2md/skills/legit-pdf2md/scripts/` + `clean_gdoc_md.py` or `drive_txn.py`
+`https://raw.githubusercontent.com/joeoliveimpact/legit-pdf2md/legit-pdf2md--v0.2.0/plugins/legit-pdf2md/skills/legit-pdf2md/scripts/` + `clean_gdoc_md.py` or `drive_txn.py`
 
 ## Step 0: Find the Composio connection
 
@@ -116,7 +116,7 @@ A re-run that found this version already cleaned reports only that and the file'
 
 ## References
 
-In the `references/` folder next to this file. This file's own link is `https://raw.githubusercontent.com/joeoliveimpact/legit-pdf2md/legit-pdf2md--v0.2.0-rc4/plugins/legit-pdf2md/skills/legit-pdf2md/SKILL.md`; replace `SKILL.md` at its end with `references/<name>`. If your own fetch cannot open a link and no GitHub connector can read it, fetch it in `COMPOSIO_REMOTE_WORKBENCH` and read the output: `import requests; print(requests.get("<link>", timeout=60).text)`.
+In the `references/` folder next to this file. This file's own link is `https://raw.githubusercontent.com/joeoliveimpact/legit-pdf2md/legit-pdf2md--v0.2.0/plugins/legit-pdf2md/skills/legit-pdf2md/SKILL.md`; replace `SKILL.md` at its end with `references/<name>`. If your own fetch cannot open a link and no GitHub connector can read it, fetch it in `COMPOSIO_REMOTE_WORKBENCH` and read the output: `import requests; print(requests.get("<link>", timeout=60).text)`.
 - `references/runtime-connector.md`: the connector path (Claude chat, Cowork, Code, ChatGPT), cell by cell.
 - `references/runtime-cli.md`: the CLI path, including Windows with the CLI inside WSL.
 - `references/tools-and-limits.md`: every Composio tool with its parameter-casing traps, and the known limits of the script and the check. Open it when a call fails validation or a result is not explained above.
