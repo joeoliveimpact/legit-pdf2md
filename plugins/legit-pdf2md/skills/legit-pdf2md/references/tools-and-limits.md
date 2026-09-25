@@ -1,14 +1,6 @@
 # Tools reference and known limits
 
-Read this when a Composio call fails validation, when you need a tool's name for a step, or when the wording check reports something the steps in `SKILL.md` do not explain.
-
-## Known limits
-
-- The wording check compares letters and digits, not punctuation. That is why Step 3 never touches code; a changed symbol elsewhere in the text is not caught.
-- Letter-spaced type is recognized by pattern: three or more single characters in a row, separated by plain spaces, with two- or three-letter OCR chunks allowed between them as long as the run still starts on a single character and is mostly single characters. Unusual spacing may need a closer look at the `split_words` and `merged_words` lists.
-- A run may end on one such chunk (`P A S TE:`), so a real two- or three-letter capital word sitting immediately after display type could be absorbed into it without the check objecting. Leading words are never absorbed.
-- Indented code blocks (four spaces, no fence) are not detected. Google's export uses fences, so this rarely matters.
-- Link addresses do not survive Google's export; only the link text does.
+Read this when a Composio call fails validation, when you need a tool's name for a step, or when the pipeline reports something `SKILL.md` does not explain.
 
 ## Tools reference
 
@@ -16,11 +8,54 @@ Read this when a Composio call fails validation, when you need a tool's name for
 |---|---|---|
 | Find | `GOOGLEDRIVE_FIND_FILE`, `GOOGLEDRIVE_GET_FILE_METADATA` | `fileId`, plus `fields` for `parents` |
 | Wrong account? | `GOOGLEDRIVE_GET_ABOUT` | run on any 404 |
-| PDF to Doc | `GOOGLEDRIVE_COPY_FILE_ADVANCED` | `fileId`, `ocrLanguage` |
-| Export | `GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE` | link expires in 1 hour |
+| PDF to Doc | `GOOGLEDRIVE_COPY_FILE_ADVANCED` | `fileId`, `mimeType`, `ocrLanguage`, `parents: ["root"]`, `description` (the stamp) |
+| Export | `GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE` | `fileId`, `mimeType: text/markdown`; link at `data.file.s3url`, expires in 1 hour |
+| Save | `GOOGLEDRIVE_CREATE_FILE_FROM_TEXT` | `file_name`, `text_content`, `mime_type`, `parent_id` |
+| Read back | `GOOGLEDRIVE_DOWNLOAD_FILE` | `fileId`; link at `data.downloaded_file_content.s3url` |
 | Clean up temp Doc | `GOOGLEDRIVE_TRASH_FILE` | `file_id`, not `fileId` |
-| Run a tool via the connector | `COMPOSIO_MULTI_EXECUTE_TOOL` | pass `tool_slug`, `arguments`, `account` |
-| Run the script | `COMPOSIO_REMOTE_WORKBENCH` | every path; each cell fetches the export and the script itself |
-| Save | `GOOGLEDRIVE_CREATE_FILE_FROM_TEXT` | `parent_id` |
+| Run a tool via the connector | `COMPOSIO_MULTI_EXECUTE_TOOL` | `tools: [{tool_slug, arguments}]`, plus `account` |
+| Run the script | `COMPOSIO_REMOTE_WORKBENCH` | `code_to_execute` |
 
-Parameter casing differs between these tools; when a call fails validation, read that tool's schema rather than assuming (`--get-schema` on the CLI). Every `GOOGLEDRIVE_*` tool above works unchanged through the Composio MCP connection and through the CLI (`composio execute <TOOL> -d '{...}'`), which is why Step 0 only has to decide which one is live.
+Parameter casing differs between these tools; when a call fails validation, read that tool's schema rather than assuming (`--get-schema` on the CLI). Every `GOOGLEDRIVE_*` tool works unchanged through the connector and through the CLI.
+
+## The script's commands
+
+`clean_gdoc_md.py pipeline EXPORT --state STATE [--final] [-o OUT]`, `apply-edits EDITS --state STATE`, `--version`, `selftest`. The older `strip` and `check` still work for flows written for 0.1.x; do not validate a pipeline result with standalone `check` (a correctly moved heading can fail it). Exit code 1 means `failed` or `needs_review` (pipeline) or a refused batch (apply-edits).
+
+## Known limits
+
+**Wording check**
+- It compares letters and digits, not punctuation. That is why fenced code is never touched; a changed symbol elsewhere is not caught.
+- Letter-spaced type is recognised by pattern: three or more single characters separated by plain spaces, with two- or three-letter OCR chunks allowed inside the run. A real two- or three-letter capital word right after display type can be absorbed into it without the check objecting. Leading words are never absorbed.
+- Indented code blocks (four spaces, no fence) are not detected. Google's export uses fences, so this rarely matters.
+- An entity-encoded combining mark (`&#769;`) or `&amp;ample` can give a false `needs_review` or `failed`. It fails safe: nothing is saved.
+- Link addresses do not survive Google's export; only the link text does.
+
+**Edits and the drop ledger**
+- Every deletion is logged and shown in `deleted`, so nothing disappears silently, but a logged deletion is only as right as its reason. Read `deleted` before reporting.
+- A block allows every op of every issue in it. When a list merges into a letter-spaced block, its item lines accept `delete`, `drops` and a heading moved across the list. All of it is logged (`deleted`, `moved_runs`), never silent.
+- `rev` guards against stale batches, not against a batch copied onto a new rev; the scope and letter checks still apply to it.
+- A `drops` entry matches its first occurrence on the lines; one that lands inside a word fails safe (`partial_word_drops`).
+- Autofix can join lines inside a multi-line inline code span (letters unchanged). Dropping every letter of an inline code span leaves empty backticks.
+- `kept_in_code` (informational) can differ between runs on the same export; the image verdict never does.
+
+**Long and large PDFs**
+- Google converts only a PDF's first 80 pages to a Doc and says nothing (measured: 100 pages in, 80 out). The run counts the pages first (with pypdf, which Composio's workbench has; without it, a simpler read that can miscount a PDF edited after it was made) and stops above 80, before any copy. A PDF whose page count cannot be read, or cannot be downloaded, is not blocked.
+- A large PDF (32 MB in testing) can come out with every picture dropped by Google's conversion. The check compares against the export, so it cannot see pictures the export never had: the report's picture count is the only sign.
+
+**Scanned PDFs**
+- OCR text is looser: page navigation and a handle split across words (`@JOEOLIVE IMPACT`) may not be flagged, so they can stay; a list can fall across two blocks and not be rebuildable as one; a step whose text OCR missed leaves only its number (drop it with a reason). Screenshot text is read as words. Report what was left.
+
+**Numbered lists** (the AI confirms them; autofix never builds one)
+- A suggested list can be wrong while every letter stays in order: real trailing numbers read as steps (`final score: 1 / 2 / 3`), numbers placed before their items (shifts every item by one), a broken run (1, 1, 2) merging the next line into item 1. The check passes all of these, which is why SKILL.md says to check each suggestion against the text.
+- An AI can still move a real trailing number (`Chapter 3. 4`) into list position.
+
+**Drive**
+- Composio can replace its workbench sandbox between any two calls, with `/mnt/files` empty. A run survives it through what is kept in the chat (the temporary Doc id and the edit batches) and through the temporary Doc's description, stamped at copy time with the source's id and version, which lets a later cell find it again. A Drive search can lag a few seconds behind a new copy, so the id in the chat is still the direct record.
+- A run belongs to one version of the source (its last-modified time when the run started). A PDF edited mid-run stops the run on the connector and the start cell cleans the new version (on the CLI it is cleaned from the copy made before the edit and keyed to that older version, so the next run redoes it); a Google Doc source edited mid-run shows as a refused batch with a new `rev`; temporary Docs from an older version are reported as `LEFTOVERS` and never trashed by the new run.
+- The save tool takes no shared-drive flag. If Drive answers "not found" for a shared-drive folder the source sits in, the run stops and reports it rather than saving somewhere else.
+- The reuse key names the source's version, not the clean file's content: a keyed clean file the user edited afterwards is still the one a re-run returns.
+- Two runs on the same source file at the same moment in one sandbox share one journal. Run one at a time per file.
+- The same Google Doc exports byte for byte the same every time, but two OCR copies of the same PDF can export slightly differently. So a re-run on an unchanged PDF can give a slightly different clean file; a byte-identical one already in the folder is reused, never saved twice.
+- On the CLI, the temporary Doc's id lives in the conversation; if it is lost, it is found by its stamp (`runtime-cli.md`, step 2), or left in My Drive with the user told its name.
+- A save whose read-back does not match leaves that file in Drive; the report names it.

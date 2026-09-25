@@ -1,155 +1,123 @@
 ---
 name: legit-pdf2md
-description: Turn a Google Doc, or a PDF stored in Google Drive (including scanned PDFs), into clean Markdown and save it back to the same Drive folder, using the Composio Google Drive connection. Use this whenever someone wants a PDF or Google Doc converted to Markdown for Claude, wants to stop PDFs eating their tokens or filling the context window, has a Markdown file exported from Google Docs full of junk (&nbsp;, base64 image blocks, letter-spaced text like "S T A R T", stray step numbers or asterisks), or asks to "clean up", "fix" or "make readable" a Docs export, even if they never say the word cleanup.
+description: Turn a Google Doc, or a PDF stored in Google Drive (including scanned PDFs), into clean Markdown and save it back to the same Drive folder, using the Composio Google Drive connection. Use this whenever someone wants a PDF or Google Doc converted to Markdown for Claude or ChatGPT, wants to stop PDFs eating their tokens or filling the context window, has a Markdown file exported from Google Docs full of junk (&nbsp;, base64 image blocks, letter-spaced text like "S T A R T", stray step numbers or asterisks), or asks to "clean up", "fix" or "make readable" a Docs export, even if they never say the word cleanup. Use it, not a general PDF tool, for any "turn this PDF into markdown", "convert this PDF" or "PDF to .md" request that comes with a Google Drive link: this skill saves the result back to Drive and proves no words changed.
 ---
 
 # Google Doc or Drive PDF to clean Markdown
 
-This is version 0.1.4 of the skill.
+This is version 0.2.0 of the skill.
 
 ## Output contract
 
-Done means all four of these:
-1. A new file named `<original title> - clean.md` (Step 6 has the naming rule) in the **same Drive folder** as the source. If the user handed you a local `.md` instead, save it beside that file as `<file name> - clean.md`.
+Done means all five:
+1. A new file `<original title> - clean.md` in the **same Drive folder** as the source (Step 5 has the naming rule, the one fallback, and re-runs: an unchanged source reuses its earlier clean file, and nothing is ever overwritten). For a local `.md` the user handed you: `<file name> - clean.md` beside it.
 2. The wording is the source's wording. Nothing reworded, summarized, corrected or added.
-3. The wording check (Step 5) passed.
-4. A short report to the user: tokens before and after, what was fixed, what could not be recovered, the file link (or local path), and "start a new chat and add this file."
+3. `pipeline --final` returned `status: validated`.
+4. The saved file was read back and its sha256 equals the pipeline's `clean_sha256`, and only then was the temporary Doc (if one was made) trashed.
+5. A short report (Step 6).
 
-If this skill is re-invoked partway through, check which of these already exist and continue from there.
+**Re-invoked partway through?** (A long session can drop this file from context; reloading it is right.) Do not start over. Composio can replace its sandbox between any two calls, so the record of a run lives in this chat, on every path: the file id, the account, the temporary Doc id, and every edit batch you have written. Keep all four in your replies as you go. With them, the runtime file's later steps rebuild the run and continue. Never make a second temporary Doc for a run that already has one.
 
 ## Why this matters
 
-Google's own Markdown export is the cheapest way to get text out of a PDF, and the only one here that reads scanned pages. But the file it produces is mostly junk. On a real 12-page guide the export was about 19,000 tokens and 78% of it was images stored as base64 text. After cleanup it was about 3,500 tokens. The person using this skill is trying to keep Claude from forgetting their documents, so the cleanup must not quietly change what the document says.
+Google's own Markdown export is the cheapest way to get text out of a PDF, and the only one here that reads scanned pages. But the file is mostly junk: a real 12-page guide exported at about 19,400 tokens, 78% of it pictures stored as base64 text, and cleans to about 3,700. (A scanned PDF exports no pictures, so it starts far smaller and the saving is smaller.) The person is trying to stop their AI forgetting their documents, so the cleanup must never quietly change what the document says. A script does everything that is certain, you (the AI) decide only what needs reading, and a check proves nothing was lost.
+
+## How the work is split
+
+- **The script** (`clean_gdoc_md.py pipeline`) strips the junk, makes every fix that cannot change wording, logs every deletion by position, and hands you a small packet: only the lines that need judgment.
+- **You** write edits for those lines (Step 3). You never retype the document.
+- **The check** (`pipeline --final`) compares the result with the export letter by letter and picture by picture. It is what makes the promise true, so never clean by hand when the script cannot run: stop and say so.
+
+The script and the Drive helper are fetched from this skill's public repo into Composio's workbench (a remote Python sandbox), so the user needs no Python and no coding setup. Always fetch from this URL; never use a copy of the repo already in the sandbox, which can be an older version:
+`https://raw.githubusercontent.com/joeoliveimpact/legit-pdf2md/legit-pdf2md--v0.2.0/plugins/legit-pdf2md/skills/legit-pdf2md/scripts/` + `clean_gdoc_md.py` or `drive_txn.py`
 
 ## Step 0: Find the Composio connection
 
-Every Drive step below runs through Composio, which reaches this skill two ways. **Find which one is live before doing anything else.** (If the user already handed you an exported `.md`, skip to Step 3's local-file route.) Do not assume, and do not ask the user to describe their setup when you can look.
+Look before asking; never make the user describe their setup. (Handed a local `.md`? Skip to the local route in Step 2.)
 
-**1. MCP connector (Claude Chat, and usually Cowork and Claude Code).** Look for Composio's tools in this session: the Drive tools by name (`GOOGLEDRIVE_FIND_FILE` and friends), or its meta-tools (`COMPOSIO_SEARCH_TOOLS`, `COMPOSIO_MULTI_EXECUTE_TOOL`, `COMPOSIO_REMOTE_WORKBENCH`). If they are there, check Drive is connected: `COMPOSIO_MANAGE_CONNECTIONS` with `{"toolkits": [{"name": "googledrive", "action": "list"}]}` must show an `ACTIVE` account. Then go to Step 1. This is the connection the setup guide teaches, so it is the one most people will have.
+1. **Connector (MCP)**: Claude chat, Cowork, Claude Code, ChatGPT. Composio's meta-tools are in the session (`COMPOSIO_MULTI_EXECUTE_TOOL`, `COMPOSIO_REMOTE_WORKBENCH`, `COMPOSIO_MANAGE_CONNECTIONS`). Check Drive: `COMPOSIO_MANAGE_CONNECTIONS` with `{"toolkits": [{"name": "googledrive", "action": "list"}]}` must show an `ACTIVE` account. Then follow **`references/runtime-connector.md`**.
+2. **CLI**: Claude Code or any AI with a shell. `composio whoami` answers with an email (on Windows try `wsl.exe -e bash -lc 'composio whoami'` before concluding it is missing), and `composio connections list` shows `googledrive` with status `ACTIVE`. Then follow **`references/runtime-cli.md`**.
+3. **Neither**: say which two you looked for, then offer: connect it (about five minutes, once: the "Connect Google Drive" section of this plugin's README), or do the Drive part by hand (upload the PDF, open it with Google Docs, File > Download > Markdown) and take the local route. The local route needs Python on this machine; Composio needs none, because its workbench brings its own.
 
-Through the connector the Drive tools this skill names are **not called directly**: pass each slug and its arguments to `COMPOSIO_MULTI_EXECUTE_TOOL`, or call `run_composio_tool(slug, args, account=...)` inside `COMPOSIO_REMOTE_WORKBENCH`. The arguments are the same. `COMPOSIO_SEARCH_TOOLS` will also offer its own plan for a PDF (download it and parse with `pdfplumber`). **Ignore that plan and follow this skill:** `pdfplumber` has no OCR, so a scanned PDF comes back empty, and its output is not the Docs export the cleaner is built for.
+`ACTIVE` is the only status that works; `EXPIRED` looks identical in a plain listing. Several accounts on the toolkit is normal: name one on every call (the reference file says how) and confirm it with `GOOGLEDRIVE_GET_ABOUT` before any write. The connector marks one account `is_default`; start there.
 
-**2. CLI (Claude Code, and Cowork when it has a shell).** If no Composio tools are in the session, try the CLI:
-
-```bash
-composio whoami                 # JSON with the account email = the CLI is installed and signed in
-composio connections list       # JSON keyed by toolkit slug
-```
-
-In `connections list`, find `googledrive` and read the `status` of each entry. Then call tools as `composio execute GOOGLEDRIVE_FIND_FILE -d '{ ... }'`. The tool names and arguments are identical to the MCP ones, so the rest of this skill is unchanged.
-
-- **`ACTIVE` is the only status that works.** `EXPIRED` appears exactly like a live connection in a plain listing and fails on the first call. Check the word, not the presence of the key.
-- **On Windows, if `composio` is not found** ("command not found", or "is not recognized" in PowerShell), the CLI is often installed inside WSL. Try `wsl.exe -e bash -lc 'composio whoami'` before concluding it is missing. If that answers, run **every** composio command the same way from the Bash tool, arguments as a double-quoted object: `wsl.exe -e bash -lc 'composio execute GOOGLEDRIVE_GET_ABOUT -d "{ }"'`, or `-d "{ fileId: \"<id>\" }"` with values. For anything longer or with quotes in it (a workbench cell, Step 6's text, a title with an apostrophe), write the JSON to a file in a folder with no spaces and pass its WSL path: `-d @/mnt/c/Users/<you>/cell.json`.
-
-**3. Neither.** Say so plainly, name which of the two you looked for, and give them the choice:
-- **Connect it.** About five minutes, once: the setup guide that came with this skill walks through the MCP connector, or `composio link googledrive` from a shell. Then re-invoke this skill and it runs end to end.
-- **Skip the connection this time.** They do the Drive steps by hand (upload the PDF to Drive, open it with Google Docs, File > Download > Markdown), hand you the `.md`, and you take Step 3's local-file route. The cleanup script needs no connection, no API key and no network.
-
-Never guess a path and let it fail at the first Drive call; a 401 or an empty tool list four steps in reads to the user as a broken skill.
-
-**Two accounts on one toolkit is normal and is not a failure.** `connections list` shows one entry per connected account, and Composio refuses Drive calls until you name one: pass `--account` with the entry's `word_id` from `connections list` (an alias works too) on the CLI, or `account` on the MCP call (the account ID or alias from `COMPOSIO_MANAGE_CONNECTIONS` with `action: "list"`). Confirm the choice with `GOOGLEDRIVE_GET_ABOUT` before any write. Step 1 covers what to do when the account is wrong. The connector and the CLI can list different accounts for the same toolkit (one real setup: four through the connector, two through the CLI). The connector marks one account `is_default`; start there.
+Use only Composio for Drive. If the app also has its own Google Drive integration, leave it out of this run: two integrations can be signed in to different accounts.
 
 ## Step 1: Find the file
 
-- Get the Drive file ID from the link (the part after `/d/`), or search by name with `GOOGLEDRIVE_FIND_FILE`.
-- Call `GOOGLEDRIVE_GET_FILE_METADATA` for its type and parent folder ID, and **ask for the fields
-  by name**: `{"fileId": "<id>", "fields": "id,name,mimeType,parents,driveId"}`. Without `fields` the
-  tool answers with `kind, id, name, mimeType` only, and `parents` is silently missing. Keep the
-  folder ID for Step 6; that ID is the only thing that puts the clean file back where the source
-  lives. If `parents` still does not come back, say so and ask where to save rather than guessing a
-  folder.
-- **If several Google accounts are connected** (Step 0), pass the account on each call: `account` on an MCP call, `run_composio_tool(..., account=...)` in the workbench, `--account <word_id>` on the CLI. Choose the account that owns or can see the file, and confirm it with `GOOGLEDRIVE_GET_ABOUT` before any write.
-- **If a call returns 404 "File not found"**, call `GOOGLEDRIVE_GET_ABOUT` before doubting the ID. The Composio connection is often signed in to a different Google account than the one that owns the file, and Drive answers a wrong account with the same 404 as a wrong ID. Tell the user which account the connection uses.
+- The file ID is the part of the link after `/d/`, or search by name with `GOOGLEDRIVE_FIND_FILE`. On the connector the start cell reads the metadata itself: call it yourself only to find the file or the account.
+- Metadata must ask for the fields by name, or `parents` silently goes missing: `{"fileId": "<id>", "fields": "id,name,mimeType,parents,driveId,modifiedTime", "supportsAllDrives": true}`. The parent folder is the only thing that puts the clean file back beside its source.
+- **404 "File not found"**: call `GOOGLEDRIVE_GET_ABOUT` before doubting the ID. The connection is often signed in to a different Google account than the one that owns the file, and Drive answers a wrong account with the same 404 as a wrong ID. With several ACTIVE accounts, try the others; otherwise tell the user which account the connection uses. Once one account finds the file, use only that account for the whole run.
 
-## Step 2: Get a Google Doc, then export it as Markdown
+## Step 2: Export and run the pipeline
 
-**If the file is a PDF**, convert it with `GOOGLEDRIVE_COPY_FILE_ADVANCED`:
-- `fileId`: the PDF, `mimeType`: `application/vnd.google-apps.document`, `ocrLanguage`: `en` (or the document's language), `supportsAllDrives`: true, `name`: `<title> - temp`, `parents`: `["root"]`.
-- The copy goes in the user's private My Drive root on purpose. Shared folders often carry public links, and this temporary Doc holds the full document text.
-- Google reads scanned pages here too (OCR). This is the step that makes scans work.
+A PDF is first copied to a temporary Google Doc in the user's private **My Drive root** (never the shared folder, which may carry a public link), with the document's OCR language (`en` unless it is in another language). That copy is where Google reads scanned pages. Google converts only a PDF's first 80 pages, without saying so, so a longer PDF stops before the copy: tell the user to split it into parts of 80 pages or fewer and run each part. **On the connector, `drive_txn.py` makes this copy in the start cell: never make it yourself**, or it is a second copy nobody trashes. On the CLI you make it. Either way, write its id into your reply at once. The Doc (or the temporary copy) is exported as `text/markdown`, and the export goes straight into the workbench: its download link expires in an hour, and the raw export (the expensive part) never enters the conversation.
 
-**Export** with `GOOGLEDRIVE_EXPORT_GOOGLE_WORKSPACE_FILE` (`fileId`, `mimeType: text/markdown`). It returns a temporary download link at `data.file.s3url` that expires after an hour, so fetch it straight away. `GOOGLEDRIVE_DOWNLOAD_FILE` with `mime_type: text/markdown` is the fallback.
+Then, in the workbench: `clean_gdoc_md.py pipeline export.md --state state.json`. It prints compact JSON:
+- `status: needs_host_edits` with a packet: `rev`, `ops_by_type`, and `issues`, a list of blocks. Each block has an `id` (`b3`), `types`, its `lines`, its `text` with every line numbered (`171| Make a free account.`), the lines just `before` and `after` it (with their numbers; a line over 400 characters is cut there and marked ` …`), and sometimes `suggested_drop` or `suggested_list` (both are lists) or `suspects` (words that look run together). Go to Step 3.
+- No issues left: it runs the final check itself. Go to Step 4.
 
-**If you made a temporary Doc**, move it to the trash once Step 5 has passed (Step 5 re-downloads the export link, and an expired link means exporting that Doc again): `GOOGLEDRIVE_TRASH_FILE` with `file_id` (snake case; this tool rejects `fileId`). Read its metadata again and confirm `trashed: true`. Trash is recoverable for 30 days. Only ever trash a Doc this skill created, and never delete permanently.
+The runtime files have the exact cells for Drive. **Local route** (the user handed you an exported `.md`, no Composio): run the same commands with this session's own Python (`python3`; `py -3` on Windows, where `python` is often a Microsoft Store shortcut that prints "Python was not found") and the script in this skill's `scripts/` folder (inside the directory this skill was loaded from), keeping the state and edits files in a temporary folder. No Python anywhere: say so and stop. Save the result beside the user's file (in a chat app, where it offers the user downloads) named by Step 5's rule (`Guide.md` → `Guide - clean.md`), never over an existing file (take `(2)`, then `(3)`), and check the saved file's sha256 equals `clean_sha256`.
 
-**With Composio, the cleanup always runs in its workbench** (`COMPOSIO_REMOTE_WORKBENCH`, a remote Python sandbox), on every path: Claude chat, Cowork, Claude Code, ChatGPT, the connector or the CLI. Nothing runs on the user's computer, so no Python and no coding setup are needed, and the raw export (the expensive part) never enters the conversation.
+## Step 3: Write the edits (judgment)
 
-Workbench files are not guaranteed to survive between calls (on the CLI every call is a fresh sandbox), so each cell in Steps 3 and 5 fetches what it needs itself: the export from its link, and the script from this skill's public repo:
-`https://raw.githubusercontent.com/joeoliveimpact/legit-pdf2md/main/plugins/legit-pdf2md/skills/legit-pdf2md/scripts/clean_gdoc_md.py`
-Keep the export link for Step 5. It expires after an hour; if it has, export again.
+Read each block and write edits for it. Send them all in one file:
 
-## Step 3: Strip the junk (script)
+```json
+{"rev": "<rev from the newest packet>", "edits": [
+  {"issue": "b5", "op": "replace", "lines": [45, 45], "text": "## Part 1 · Start where you are"},
+  {"issue": "b18", "op": "number_list", "lines": [171, 177], "text": "1. Make a free account.\n2. Connect it."},
+  {"issue": "b38", "op": "replace", "lines": [392, 392], "text": "<the line without the nav text>",
+   "drops": ["You're here: troubleshooting • Next: the stack"], "reason": "page navigation"}]}
+```
 
-One workbench cell: download the export link to `export.md` and the script to `clean_gdoc_md.py`, run
-`subprocess.run([sys.executable, "clean_gdoc_md.py", "strip", "export.md", "-o", "clean.md"], capture_output=True, text=True)`,
-then print the script's JSON output and the contents of `clean.md`. The stripped text is small; it is what Step 4 edits.
+then `clean_gdoc_md.py apply-edits edits.json --state state.json`. It is all or nothing: any error and nothing changes, the errors say why, fix them and send again. Every successful batch returns a **new packet with a new `rev`, new line numbers and new block ids**; a next batch must use those. Leave a block alone if nothing in it needs changing.
 
-**On the CLI**, write the cell to a JSON file as `{"code_to_execute": "..."}` and run `composio execute COMPOSIO_REMOTE_WORKBENCH -d @<file>` (with the CLI inside WSL, the `/mnt/c/...` path from Step 0).
+**The rules the script enforces.** Letters and digits must stay exactly the same and in the same order. Case, spacing, punctuation and Markdown are yours. The exceptions each need their op:
+- `replace`: new text for the lines. To remove page furniture from a line, list the exact removed text in `drops` with a `reason`.
+- `delete`: remove whole lines of page furniture, with a `reason`.
+- `number_list`: rebuild a numbered list; only the stand-alone step numbers may move, each to the start of its own item, in order.
+- `move_heading`: a letter-spaced heading that landed inside a sentence moves out whole, onto its own line (`"text": "<heading>\n\n<the sentence rejoined>"` over the block's lines).
+An edit may cover a block's lines plus the line either side; deletions (`delete`, `drops`) only work on the lines that were flagged, so a real sentence sitting between two flagged lines cannot be removed. Only use ops listed for the block's types in `ops_by_type`.
 
-**If the workbench fails**, say so and stop. Never clean the Markdown by hand: the script and its check are what make the wording guarantee true.
+**What to do with each type:**
+- `letter_spaced`: display type came out as single letters (`S T A R T W H E R E Y O U A R E`, `W H Y`). Rejoin the words: `Start where you are`. Part and section titles become `##`, sub-labels `###` or bold; the document title gets `#`. Sentence case. A line mixing a spaced title with normal text: title as the heading, text below it. A word glued to spaced type (`MetricoolB O N U S`) splits: `### Metricool` then `Bonus · not in the reel`.
+- `number_list` with `suggested_list`: the script's proposed list, with its own `lines`. **Check it against the text, do not rubber-stamp it.** It can be wrong when the numbers are real content (`final score: 1 / 2 / 3`, `Chapter 3`), when the numbers sit before their items rather than after, or when the run is broken (1, 1, 2). If it is right, send it as a `number_list` edit with its `lines` and `text`. If not, write the right list, or leave the numbers where they are.
+- `detached_number`: a step number pulled out of its list. Rebuild the list, or if you cannot tell which step it belongs to, keep the sentences whole and drop the stray number (`drops` + `reason`) rather than guess. Leave a blank line after a list's last item.
+- `repeated_line`, `page_nav_attached`: page furniture repeated on every page. Remove it: a whole `repeated_line` with `delete`; the navigation text stuck to a real line with `replace` + `drops` (the block's `suggested_drop` is the text to drop). Keep a line that repeats because it is real content, and keep the author's name and handle once where they first appear.
+- `code_label`: the export put display labels in code font (`` `CONTENT` ``). Remove the backticks from labels and headings; keep them on real code, commands and file names.
+- `odd_asterisks`: remove one only when it is clearly OCR noise; a wildcard, a multiplication sign, real bold or italics stay.
+- `glued_words`: the export ran two table cells or words together with no space (`ClaudeChat only`, `Metricool20 posts`); the block's `suspects` lists them. Insert the missing space with `replace` (`Claude Chat only`); only spaces may change, never letters. Leave a real name written that way (`YouTube`, `HubSpot`) and anything you are not sure of.
 
-**Local-file route** (the user handed you a `.md`, no Composio needed): the workbench cannot see a local file, so use this session's own Python (the chat app's code execution, or `python3`; `py -3` on Windows) with the script in this skill's `scripts/` folder: `strip <their file> -o clean.md` here, and `check <their file> clean.md` in Step 5. Skip Step 6: save the clean file beside theirs, or in the chat app offer it as a download. No Python at all: say so and stop.
+**Never**: fix a typo, reword, add an intro or summary, describe an image, or reorder content. Keep every `[image N]` line where it is. When layout scrambled the order (table cells, titles apart from their fixes), leave it and name the spot in the report; the check cannot tell a right move from a wrong one.
 
-It works outside fenced code blocks only; code blocks (including ones inside quotes and lists) and inline code are never touched, except code formatting that holds nothing but pictures. It removes base64 images (leaving `[image N]` placeholders, each on its own line outside list items, headings, quotes and tables), `&nbsp;` and other entities, broken characters, Google's backslash escapes, the code-font backticks the Drive API export wraps around letter-spaced text and bare step numbers, asterisks that OCR scatters between letters, trailing spaces and extra blank lines. It never changes wording. It prints JSON with `stats` and a `worklist`.
+## Step 4: The final check
 
-## Step 4: Rebuild the structure (judgment)
+`clean_gdoc_md.py pipeline export.md --state state.json --final -o clean.md` (it writes `clean.md` only when validated). Always validate this way, never with the older standalone `check`: a correctly moved heading can fail that one.
+- `validated`: go to Step 5 (on the connector, after this read, with `SAVE = True`). `left_for_review` counts blocks you chose to leave; that is allowed. Read `deleted` (every removal, with its reason): anything there that is real content, put back before saving.
+- `needs_review`: `unexplained_drops` lists text that was removed without a logged reason. Put it back or log it (`drops`/`delete` with a reason), then run the final check again. The file is not saved until this passes.
+- `failed`: read `check`. `added_runs` is text the source never had; `partial_word_drops` cut into a word; `merged_words` joined two words ("now here" became "nowhere"; rejoining letter-spaced type is not a merge, even with OCR chunks like `P A S TE`, so if a rejoined heading is listed, its first or last piece is an ordinary word: keep that word separate); `images` must show `ok: true` (every picture present, in order, none invented). Fix with more edits and check again. `moved_runs` and `split_words` do not fail it; mention moved text in the report.
 
-A script cannot do this part, because the export has lost information that only reading can restore. Start from the worklist: it names the lines that need attention. If you see the same pattern on a line it missed, fix that too. Make targeted edits by line to your copy of the printed text; retyping the whole document costs far more and is where wording drifts.
+## Step 5: Save, verify, clean up
 
-**Letter-spaced text** (`letter_spaced`). Display type from a designed PDF comes out as single letters: `S T A R T W H E R E Y O U A R E`, or a short `W H Y`. The spaces between words are gone, so read it and rejoin it: `Start where you are`.
-- Part and section titles become `##`, sub-labels `###` or bold. Give the document title `#` even if a part label happens to come before it.
-- Use sentence case for headings. Case is styling, not wording.
-- When a line mixes a spaced title with normal text, split them: the title becomes the heading, the text stays below it.
+Name: `<original title> - clean.md`, where a PDF's title loses a trailing `.pdf` (any case) and nothing else is ever cut (`Guide.pdf` → `Guide - clean.md`; `Notes 09.11.26` → `Notes 09.11.26 - clean.md`). The script's `clean_name(title, mime_type)` applies this rule; use it rather than typing the name. A local `Guide.md` becomes `Guide - clean.md` beside it.
 
-**Page furniture** (`repeated_lines`, `repeated_openings`). A PDF repeats its header and footer on every page, and the export repeats them too. Some are identical; others change a few words per page but open the same way ("You're here: ...") or end with the same handle. Remove them. Keep a line that repeats because it is real content, like a label that opens each section. Keep the author's name once and their handle once, where each first appears.
+**Re-runs.** Every clean file saved to Drive carries a reuse key in its description: the source's id and last-modified time. Before any work, look for it (the runtime file says how): if this exact version of the source was cleaned before, report that file and stop. If the source changed, or another file already has the name, save `<title> - clean (2).md` (then `(3)`): never overwrite.
 
-**Detached numbers** (`detached_numbers`). Step numbers get pulled out of their list and land on their own line, at the end of the previous sentence, or in the middle of a sentence that crosses a page break. Rebuild them as a numbered list (`1.`, `2.`) and rejoin any sentence they cut. Leave a blank line after the last item: without it, the next heading or label renders as part of the final step. If you cannot tell which step a number belongs to, keep the sentences whole and drop the stray number rather than guess.
+Save in the source's folder, read the file back, and compare its sha256 with `clean_sha256`. Only when they match, trash the temporary Doc this run made and confirm it reads `trashed: true`. Trash is recoverable for 30 days; never delete permanently, and never trash anything this run did not create. If the account may not add files to the source's folder, the clean file goes to My Drive root and the report says so. If a read-back does not match, stop: keep the temporary Doc and report the saved file's id so the user can check it. The runtime file has the exact calls (on the connector, `drive_txn.py` does all of this).
 
-**Sentences split by page breaks** (`split_sentences`). A line that stops mid-sentence, followed by a paragraph that starts in lowercase, is one sentence the page break cut. Join them.
+## Step 6: Report
 
-**Unpaired asterisks** (`odd_asterisks`). Decide in context. Remove one only when it is clearly OCR noise; a wildcard like `file*.md`, a multiplication sign, and real bold or italics all stay.
+A re-run that found this version already cleaned reports only that and the file's link. Otherwise keep it short:
+- Tokens before and after (`tokens`), the automatic fixes (`autofixed`), and how many edits you made.
+- The check result: validated.
+- **What could not be recovered**, every time: link addresses (only link text survives Google's export), pictures listed under `kept_in_code`, scrambled spots you left in place, blocks you left for review, and whether a temporary Doc was made and trashed.
+- Where the file went (the link, or the local path, and the fallback if one was used), and: "Start a new chat and add this file instead of the original."
 
-**Scrambled order.** Page layout sometimes exports out of reading order: table cells in the wrong sequence, problem titles grouped apart from their fixes. Do not reorder it. Guessing which piece belongs where can change what the document says, and the check cannot tell a correct move from a wrong one. Leave it in place and name each spot in the report so the user can fix it in seconds. One exception: a heading that landed inside a sentence may be moved out so the sentence reads whole. Put the moved heading on its own line: the check reports that as `moved_runs`, not added text, and a short heading only counts as a move when it stands alone.
+## References
 
-**Tables.** If a table came out as loose lines and its cells still read in the right order, you may rebuild it as a Markdown table. If the order is scrambled, treat it as scrambled order above.
-
-**Images** (`image_lines`). Keep each `[image N]` on its own line where it sat. Do not describe the image.
-
-**Code-font labels** (`code_spans`). The Drive API export puts display labels in code font, like `` `CONTENT` ``. Remove the backticks from labels and headings; keep them on anything that is real code, a command or a file name.
-
-**Copy-paste prompts and folder trees** may go in code fences. Inside a fence, remove leftover escapes like `1\.`, because fences show backslashes literally.
-
-**Do not** fix typos, reword, or add an intro or summary. The user's words are the data.
-
-## Step 5: Check the wording
-
-A second self-contained workbench cell: download the export link and the script again, write your rebuilt text to `clean.md` (put it in the cell as a JSON string literal, so quotes and backslashes survive), run `check export.md clean.md` the same way, and print the result and the exit code.
-
-It compares wording word by word, in any language, ignoring spacing, case, Markdown, code-fence lines and removed junk. It does not compare punctuation, which is why Step 3 never touches code. Exit code 1 means it failed.
-
-Run it on the **rebuilt** file. On Step 3's raw output it can fail on purpose: a word glued to letter-spaced type (`MetricoolB O N U S`) reads as a merge until Step 4 splits it. That is the worklist doing its job, not a bug in the cleaner.
-- `added_runs` must be empty. Anything listed, even one letter or digit, is text the source never had. Remove it and check again.
-- `partial_word_drops` must be empty. Each is a deletion that cut into a word, which changes the word. Restore it.
-- `merged_words` must be empty. Two separate words were joined into one ("now here" became "nowhere"). Split them again. Rejoining letter-spaced type is not a merge, including when OCR chunked two or three letters together inside the run (`C O P Y - P A S TE`, `T O WR ITE`). If a rejoined heading is still reported, the run's first or last piece is an ordinary word rather than display type: look at that one word, and leave the rest of the heading joined.
-- `split_words` are single words the rebuild split in two. Most are words the export glued together, like "MetricoolBONUS"; keep those, undo any other.
-- `inline_drops` are whole words deleted from a line that otherwise survives. Each must be page furniture you removed on purpose, like a handle stuck to a title. A deleted "not" or "no" flips the meaning: put it back.
-- `dropped_lines` are whole lines removed. They should all be page furniture.
-- `moved_runs` lists text that changed place. Each one needs a line in the report.
-- `images` must show `ok: true`: every picture in the export is still an `[image N]` placeholder, in the same order, none added (`missing`, `invented`, `in_order`). Keep the placeholder even when you remove the page furniture around it. `kept_in_code` lists pictures the export put inside code formatting next to text; they cannot be recovered, so name them in the report.
-
-## Step 6: Save it back to Drive
-
-Call `GOOGLEDRIVE_CREATE_FILE_FROM_TEXT` with `file_name` `<original title> - clean.md`, where a PDF's title loses a trailing `.pdf` (any case) first (`Guide.pdf` becomes `Guide - clean.md`) and nothing else is ever cut (`Notes 09.11.26` becomes `Notes 09.11.26 - clean.md`), `text_content` the clean Markdown, `mime_type` `text/markdown`, and `parent_id` the folder ID from Step 1.
-
-## Step 7: Report
-
-Keep it short:
-- Estimated tokens before and after (from `stats`).
-- What was fixed, using the `stats` counts plus how many lines you edited.
-- **What could not be recovered**, every time: link addresses (only the link text survives the export), pictures listed in `kept_in_code`, any scrambled spots you left in place, and whether a temporary Doc was made and trashed.
-- The check result.
-- The file link, and: "Start a new chat and add this file instead of the PDF." For a local file with no Drive link, say where the clean file was saved.
-
-## Reference
-
-`references/tools-and-limits.md` (next to this file) has the table of every Composio tool by step, with its parameter-casing traps, and the known limits of the cleaner and the wording check. Read it when you need a tool's exact arguments, when a call fails validation, or when the check reports something the steps above do not explain.
+In the `references/` folder next to this file. This file's own link is `https://raw.githubusercontent.com/joeoliveimpact/legit-pdf2md/legit-pdf2md--v0.2.0/plugins/legit-pdf2md/skills/legit-pdf2md/SKILL.md`; replace `SKILL.md` at its end with `references/<name>`. If your own fetch cannot open a link and no GitHub connector can read it, fetch it in `COMPOSIO_REMOTE_WORKBENCH` and read the output: `import requests; print(requests.get("<link>", timeout=60).text)`.
+- `references/runtime-connector.md`: the connector path (Claude chat, Cowork, Code, ChatGPT), cell by cell.
+- `references/runtime-cli.md`: the CLI path, including Windows with the CLI inside WSL.
+- `references/tools-and-limits.md`: every Composio tool with its parameter-casing traps, and the known limits of the script and the check. Open it when a call fails validation or a result is not explained above.
+- `references/modes.md`: optional link and layout modes (coming in a later version).

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0 - 2026-09-25
+
+**A script does everything that is certain, the AI decides only what needs reading, and nothing is saved until a check proves no word or picture was lost.** Built from Joe's ChatGPT run of 0.1.3 (it worked, slowly) and its 87-section report, then hardened by independent checker rounds and live runs in Claude and ChatGPT.
+
+- **One pipeline instead of hand cleanup.** `pipeline` strips the junk, makes every fix that cannot change a word (page navigation, repeated handles, `S t e p 1`, code-font runs, sentences a page break cut), and hands the AI a small packet of only the lines that need judgment, each line numbered. On a real 12-page guide: 43 blocks, about 3,700 tokens, instead of the whole document.
+- **The AI edits by line, and the script refuses any edit that changes a word.** `apply-edits` takes a batch of edits (replace, delete, rebuild a numbered list, move a heading out of a sentence), all or nothing, tied to the packet it was written for.
+- **Every deletion is logged with its reason.** The final check fails if anything was invented or merged or a picture went missing, and anything removed without a logged reason blocks the save.
+- **Numbered lists are confirmed by the AI, not rebuilt blindly.** The script proposes each list; real numbers ("score: 1 / 2 / 3"), numbers before their items and broken runs can make a wrong one, so the AI checks it against the text.
+- **The saved file is proven.** It is downloaded again and matched, fingerprint for fingerprint, against the text that passed the check. Only then is the temporary Doc trashed, and only the one this run made.
+- **Runs survive Composio resetting its sandbox,** which happens between calls without warning. The temporary Doc's id and the edits live in the chat, and every step rebuilds from them, so a reset never makes a second copy or a second save. The temporary Doc is stamped with the file and version it came from: a lost id is found again, another file's copy is never taken, and on the connector a PDF edited mid-run is never cleaned from its old copy.
+- **Re-runs reuse.** The clean file carries a reuse key (the source's id and last-modified time). Run it again on an unchanged file and you get the clean file back with no work done; if the file changed, the new one is `(2)`. Nothing is ever overwritten.
+- **Works through the connector (Claude and ChatGPT) and the CLI (including Windows with Composio in WSL),** with a guide for each in `references/`. Proven end to end on both, and in ChatGPT.
+- **An expired download link stops the run** instead of being cleaned as if it were the document.
+- **A PDF over 80 pages stops before anything is copied.** Google converts only the first 80 pages and says nothing; the skill counts the pages first and asks for the PDF in parts.
+- **Words run together across table cells are caught.** Google's export glues neighbouring cells (`ClaudeChat only`, `Metricool20 posts`), and a letters-only check cannot see a missing space. They now go to the AI as `glued_words`, which may only add the space back. Real names written that way (`YouTube`, `HubSpot`) are left alone. Found in the ChatGPT integration test.
+- **Plain requests start it.** "Turn this PDF into markdown" with a Drive link picks this skill in Claude without naming it (tested headless). In ChatGPT, mention `@legit-pdf2md`: there the plain sentence lets ChatGPT use its own PDF tools.
+
 ## 0.1.4 - 2026-09-22
 
 **No picture goes missing without the check saying so.** Found by running 0.1.3 in ChatGPT on a real 12-page guide: 5 of its 9 pictures vanished from the clean file and the wording check still passed.

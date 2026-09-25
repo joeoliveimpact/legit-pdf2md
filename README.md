@@ -30,6 +30,8 @@ You can already do this by hand: upload to Drive, open with Google Docs, downloa
 
 Because you installed it as a plugin, it updates itself whenever it improves. Nothing to re-download.
 
+**On ChatGPT:** in the sidebar click **Plugins**, then top right **Add**, then **Add a marketplace**. Paste `joeoliveimpact/legit-pdf2md`, find **legit-pdf2md** in the list and click **+**. Start a new chat and begin with `@legit-pdf2md`: *"@legit-pdf2md turn this PDF into markdown"* with a Drive link. Without the `@`, ChatGPT tends to reach for its own PDF tools instead of this skill.
+
 ## Connect Google Drive (about 5 minutes, once)
 
 The skill reaches your Drive through [Composio](https://composio.dev). You only do this once.
@@ -58,30 +60,34 @@ So the five minutes is not the price of this skill. It is the last time you set 
 
 **On Claude Code instead?** Composio ship their own plugin, which drives the CLI rather than the connector above: add the marketplace `ComposioHQ/composio-plugin-cc`, install **Composio**, then `composio link googledrive`. The skill checks for the connector and the CLI, and uses whichever you have.
 
-**Two Google accounts connected?** That is normal and it is handled - Composio will not act until one is named, so the skill names it and confirms whose Drive it is opening before it writes anything.
+**Two Google accounts connected?** That is normal and it is handled - Composio will not act until one is named, so the skill names one, checks whose Drive it is, and uses that one account for the whole run.
 
-**No connection at all?** The skill still works. Do the Drive steps yourself (upload, open with Google Docs, File > Download > Markdown), hand it the file, and it does the cleanup - which is the part you actually wanted. No account needed for that path.
+**No connection at all?** The skill still works. Do the Drive steps yourself (upload, open with Google Docs, File > Download > Markdown), hand it the file, and it does the cleanup - which is the part you actually wanted. No Composio account needed for that path, but it does need Python on your computer.
 
 ## What you get back
 
-A new file, `<your document> - clean.md`, in the **same Drive folder** as the original, plus a short report: tokens before and after, what was fixed, and what could not be recovered.
+A new file, `<your document> - clean.md`, in the **same Drive folder** as the original, plus a short report: tokens before and after, what was fixed, and what could not be recovered. Before the report, the skill downloads the saved file again and checks it is exactly the text that passed the check.
+
+Run it again on the same file and nothing is redone: it hands you the clean file it already made. If the PDF has changed since, you get `<your document> - clean (2).md` next to the first one. It never overwrites.
 
 Then start a new chat and add the clean file. That is the whole point.
 
 ## What it will not do
 
-**It never changes your wording.** Not a rephrase, not a correction, not a "better" heading. After cleaning, it runs a check that compares the result against the source and fails if anything was invented, cut or merged. Headings, spacing and structure are restored by reading the document; the words are yours.
+**It never changes your wording.** Not a rephrase, not a correction, not a "better" heading. After cleaning, it runs a check that compares the result against the source letter by letter and fails if anything was invented or merged, or a picture went missing. Every deletion (page headers, footers, repeated handles) is logged with its reason, and anything removed without one blocks the save. Headings, spacing and structure are restored by reading the document; the words are yours.
 
 Some things a PDF cannot give back, and it tells you when that happens:
 
 - **Images become `[image N]` placeholders.** The picture is gone from the text; the position is kept.
+- **Links keep their text, not their address.** Google's export drops where a link pointed.
 - **Scans depend on the OCR.** Google reads them well, but a bad scan is still a bad scan.
 - **Complex tables and multi-column layouts** come through as best it can and are worth a look.
 
 ## Under the hood
 
-- `SKILL.md` - the procedure Claude follows, including how it finds your connection.
-- `skills/legit-pdf2md/scripts/clean_gdoc_md.py` - the cleaner. **Standard library only**: no network, no API key, no dependencies. `strip` removes the junk, `check` proves the wording survived, `selftest` proves both work.
+- `SKILL.md` - the procedure the AI follows, including how it finds your connection, plus `references/` for each way of running it.
+- `skills/legit-pdf2md/scripts/clean_gdoc_md.py` - the cleaner. **Standard library only**: no network, no API key, no dependencies. `pipeline` removes the junk, makes every fix that cannot change a word, and hands the AI only the lines that need judgment; `apply-edits` takes the AI's fixes and refuses any that would change a word; `pipeline --final` proves the wording and every picture survived; `selftest` proves it all works.
+- `skills/legit-pdf2md/scripts/drive_txn.py` - the Drive side, run inside Composio: saves beside the source, reads the file back, and only then trashes the temporary Doc it made.
 
 ```bash
 python3 clean_gdoc_md.py selftest

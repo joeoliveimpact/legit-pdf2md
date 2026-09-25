@@ -9,7 +9,7 @@
     {
       "name": "legit-pdf2md",
       "source": "./plugins/legit-pdf2md",
-      "description": "v0.1.4 - Turn a PDF or Google Doc in your Drive into clean Markdown, and save it back to the same folder. PDFs are the most expensive thing you can hand an AI: every page is sent as a picture as well as text, so a 9-page guide can cost 17,600 tokens where the same words as Markdown cost 3,350. This converts it (scanned pages included, via Google's own OCR), strips the junk a Docs export leaves behind - base64 image blocks, &nbsp;, letter-spaced text like 'S T A R T', stray asterisks - and checks the wording never changed. Works through a Composio Google Drive connection over MCP or the CLI; it detects which one you have. No connection? It still cleans a Markdown file you exported by hand."
+      "description": "v0.2.0 - Turn a PDF or Google Doc in your Drive into clean Markdown, and save it back to the same folder. PDFs are the most expensive thing you can hand an AI: every page is sent as a picture as well as text, so a 9-page guide can cost 17,600 tokens where the same words as Markdown cost 3,350. This converts it (scanned pages included, via Google's own OCR), strips the junk a Docs export leaves behind - base64 image blocks, &nbsp;, letter-spaced text like 'S T A R T', stray asterisks - and checks the wording never changed. Works through a Composio Google Drive connection over MCP or the CLI; it detects which one you have. No connection? It still cleans a Markdown file you exported by hand."
     }
   ]
 }
